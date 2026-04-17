@@ -1,14 +1,19 @@
-# Swim Frame-by-Frame Analyzer
+# Swim Coach Annotator
 
-Breaststroke video analyzer with frame-accurate scrubbing for 17-yard pool training.
+Frame-by-frame swim video analyzer with touch drawing for coaching annotations.
 
 ## Features
-- HEVC .MOV native playback (Safari on Apple Silicon)
-- Frame-by-frame stepping (arrow keys or buttons)
-- Mark events: Push-off, Breakout, Stroke, Turn, Finish
-- Auto-computes: stroke rate, cycle times, velocity, lap splits, underwater phases
-- Keyboard shortcuts for fast analysis
-- Works on iPad, iPhone, and Mac Safari
+- Load videos from Photo Library (iPad/iPhone) or files (Mac)
+- Frame-by-frame stepping
+- **Draw on paused frames** with finger/mouse to annotate technique
+- 6 colors, adjustable line width, eraser tool
+- Undo and clear drawings
+- Save annotated frames as PNG screenshots
+- HEVC .MOV native playback on Safari/Apple Silicon
 
 ## Usage
-Open [the analyzer](https://nikhil1967.github.io/swim-analyzer/) and load a swim video from your Photo Library.
+1. Open in Safari: [https://nikhil1967.github.io/swim-analyzer/](https://nikhil1967.github.io/swim-analyzer/)
+2. Load a swim video
+3. Pause on a frame
+4. Draw corrections — red for issues, green for good form
+5. Save the annotated frame to share with swimmers
