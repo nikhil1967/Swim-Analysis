@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Swim Coach Annotator</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0c;color:#b0c0d0;font-family:'IBM Plex Mono','Menlo',monospace;min-height:100vh;-webkit-text-size-adjust:100%;overflow-x:hidden;touch-action:manipulation}
+.wrap{max-width:1000px;margin:0 auto;padding:12px 12px 80px}
+button{font-family:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+
+/* Upload */
+#upload-zone{display:flex;flex-direction:column;align-items:center;justify-content:center;height:360px;border-radius:12px;cursor:pointer;border:1px dashed rgba(0,229,255,.2);background:rgba(0,229,255,.015)}
+#upload-zone:hover{border-color:rgba(0,229,255,.4)}
+
+#player-area{display:none}
+
+/* Video + Canvas — completely clean, no overlays */
+.canvas-wrap{position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#000;margin-bottom:0;touch-action:none}
+.canvas-wrap video{width:100%;display:block;max-height:520px;object-fit:contain;background:#000}
+#draw-canvas{position:absolute;top:0;left:0;width:100%;height:100%;touch-action:none}
+.canvas-wrap.drawing #draw-canvas{z-index:10;cursor:crosshair}
+.canvas-wrap:not(.drawing) #draw-canvas{pointer-events:none;z-index:1}
+
+/* Status bar */
+#status-bar{padding:6px 12px;border-radius:0 0 8px 8px;font-size:11px;display:none;margin-bottom:6px}
+#status-bar.loading{display:block;background:rgba(255,215,64,.06);color:#ffd740}
+#status-bar.error{display:block;background:rgba(255,82,82,.06);color:#ff5252}
+#status-bar.ready{display:block;background:rgba(118,255,3,.04);color:#76ff03}
+
+/* Info bar below video */
+.info-bar{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05);border-top:none;border-radius:0 0 10px 10px;margin-bottom:8px}
+.time-display{font-size:18px;font-weight:800;color:#00e5ff;font-variant-numeric:tabular-nums}
+.frame-display{font-size:13px;color:#5a7a8a}
+.frame-display b{color:#ffd740;font-weight:700}
+.speed-display{font-size:13px;font-weight:700;color:#3a4a5a}
+.speed-display.changed{color:#ffd740}
+.mode-display{font-size:11px;font-weight:700;letter-spacing:1px;padding:4px 12px;border-radius:14px}
+.mode-play{background:rgba(0,229,255,.1);color:#00e5ff}
+.mode-draw{background:rgba(255,215,64,.1);color:#ffd740}
+.mode-erase{background:rgba(255,82,82,.1);color:#ff5252}
+
+/* Buttons */
+.btn{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px 14px;color:#7a8a9a;font-size:13px;font-weight:600;min-height:48px;display:flex;align-items:center;justify-content:center;gap:4px;transition:.12s;white-space:nowrap}
+.btn:active{background:rgba(255,255,255,.08)}
+.btn-play{background:linear-gradient(135deg,#00e5ff,#0077b6);color:#0a0a0c;font-weight:800;border:none}
+.btn-pause{background:rgba(255,82,82,.12);border:1px solid rgba(255,82,82,.3);color:#ff5252;font-weight:800}
+.btn-sm{padding:8px 10px;min-height:38px;font-size:12px;border-radius:8px}
+.btn-on{background:rgba(255,215,64,.12)!important;border-color:#ffd740!important;color:#ffd740!important}
+
+/* Frame controls */
+.frame-row{display:grid;grid-template-columns:1fr 1fr 1.5fr 1fr 1fr;gap:5px;margin-bottom:6px}
+
+/* 10-frame controls */
+.frame10-row{display:grid;grid-template-columns:1fr 1.5fr 1fr;gap:5px;margin-bottom:8px}
+
+/* Speed row */
+.speed-row{display:flex;gap:4px;margin-bottom:10px;overflow-x:auto;padding-bottom:2px;align-items:center}
+.speed-label{font-size:9px;color:#3a4a5a;letter-spacing:1.5px;flex-shrink:0;padding-right:4px}
+
+/* Drawing toolbar */
+.draw-bar{background:rgba(255,255,255,.025);border-radius:12px;padding:12px;border:1px solid rgba(255,255,255,.05);margin-bottom:8px}
+.draw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.draw-label{font-size:9px;color:#3a4a5a;letter-spacing:1.5px;text-transform:uppercase;margin-right:2px;flex-shrink:0}
+
+/* Color swatches - just 3 */
+.swatch{width:40px;height:40px;border-radius:50%;border:3px solid transparent;cursor:pointer;transition:.12s;flex-shrink:0}
+.swatch.on{border-color:rgba(255,255,255,.6);transform:scale(1.15);box-shadow:0 0 12px rgba(255,255,255,.15)}
+
+/* Tool buttons */
+.tool-btn{padding:10px 16px;min-height:44px;border-radius:8px;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
+
+/* Width slider */
+.width-slider{-webkit-appearance:none;appearance:none;width:100px;height:6px;background:rgba(255,255,255,.1);border-radius:3px;outline:none;flex-shrink:0}
+.width-slider::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;background:#fff;border:2px solid #333;cursor:pointer}
+
+.save-btn{background:linear-gradient(135deg,#76ff03,#00c853);color:#0a0a0c;border:none;border-radius:10px;padding:12px 20px;font-weight:800;font-size:13px;font-family:inherit;cursor:pointer;min-height:48px;flex-shrink:0}
+
+.divider{width:1px;height:28px;background:rgba(255,255,255,.08);margin:0 4px;flex-shrink:0}
+
+.tip{padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.015);border:1px solid rgba(255,255,255,.03);font-size:11px;color:#2a3a4a;line-height:1.7}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- Upload -->
+  <label id="upload-zone">
+    <input type="file" accept="video/*" id="file-input" style="display:none">
+    <div style="font-size:48px;margin-bottom:10px;opacity:.4">🏊</div>
+    <div style="font-size:16px;color:#00e5ff;font-weight:600">Load Swim Video</div>
+    <div style="font-size:12px;color:#3a4a5a;margin-top:6px">Select from Photo Library or Files</div>
+  </label>
+
+  <!-- Player -->
+  <div id="player-area">
+    <div id="status-bar"></div>
+
+    <!-- Video + Drawing Canvas — CLEAN, no overlays -->
+    <div class="canvas-wrap" id="canvas-wrap">
+      <video id="vid" playsinline webkit-playsinline preload="auto" muted></video>
+      <canvas id="draw-canvas"></canvas>
+    </div>
+
+    <!-- Info bar BELOW video -->
+    <div class="info-bar">
+      <div>
+        <span class="time-display" id="time-display">--:--.--</span>
+        <span class="frame-display" style="margin-left:12px">Frame <b id="frame-num">--</b></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="speed-display" id="speed-display">1.00x</span>
+        <span class="mode-display mode-play" id="mode-display">▶ PLAY</span>
+      </div>
+    </div>
+
+    <!-- Play / Pause + ±1 Frame -->
+    <div class="frame-row">
+      <button class="btn" onclick="step(-1)">◀ 1 Frame</button>
+      <button class="btn" onclick="nudge(-0.5)">-0.5s</button>
+      <button class="btn btn-play" id="play-btn" onclick="toggle()">▶ PLAY</button>
+      <button class="btn" onclick="nudge(0.5)">+0.5s</button>
+      <button class="btn" onclick="step(1)">1 Frame ▶</button>
+    </div>
+
+    <!-- ±10 Frames -->
+    <div class="frame10-row">
+      <button class="btn" onclick="step(-10)">⏪ 10 Frames</button>
+      <button class="btn" onclick="toggle()" id="play-btn2" style="background:transparent;border:1px dashed rgba(255,255,255,.08);color:#3a4a5a;font-size:11px">Pause to draw</button>
+      <button class="btn" onclick="step(10)">10 Frames ⏩</button>
+    </div>
+
+    <!-- Speed -->
+    <div class="speed-row">
+      <span class="speed-label">SPEED</span>
+      <button class="btn btn-sm" id="spd-01" onclick="setSpd(0.1)">0.1x</button>
+      <button class="btn btn-sm" id="spd-025" onclick="setSpd(0.25)">0.25x</button>
+      <button class="btn btn-sm" id="spd-05" onclick="setSpd(0.5)">0.5x</button>
+      <button class="btn btn-sm btn-on" id="spd-1" onclick="setSpd(1)">1x</button>
+      <button class="btn btn-sm" id="spd-2" onclick="setSpd(2)">2x</button>
+      <button class="btn btn-sm" id="spd-4" onclick="setSpd(4)">4x</button>
+      <button class="btn btn-sm" id="spd-10" onclick="setSpd(10)">10x</button>
+    </div>
+
+    <!-- Drawing Toolbar -->
+    <div class="draw-bar">
+      <!-- Tools -->
+      <div class="draw-row" style="margin-bottom:10px">
+        <span class="draw-label">TOOL</span>
+        <button class="btn tool-btn" id="tool-draw" onclick="setTool('draw')" style="background:rgba(255,215,64,.12);border:1px solid #ffd740;color:#ffd740">✏️ Draw</button>
+        <button class="btn tool-btn" id="tool-erase" onclick="setTool('erase')" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:#7a8a9a">🧹 Erase</button>
+        <div class="divider"></div>
+        <button class="btn tool-btn" onclick="undoDraw()" style="color:#80d8ff">↩ Undo</button>
+        <button class="btn tool-btn" onclick="clearDraw()" style="color:#ff5252">🗑 Clear</button>
+        <div class="divider"></div>
+        <button class="save-btn" onclick="saveFrame()">📸 Save Frame</button>
+      </div>
+
+      <!-- Colors + Width -->
+      <div class="draw-row">
+        <span class="draw-label">COLOR</span>
+        <div class="swatch on" id="sw-#ff3333" onclick="setColor('#ff3333')" style="background:#ff3333" title="Red"></div>
+        <div class="swatch" id="sw-#000000" onclick="setColor('#000000')" style="background:#000000;border:2px solid rgba(255,255,255,.15)" title="Black"></div>
+        <div class="swatch" id="sw-#ffffff" onclick="setColor('#ffffff')" style="background:#ffffff" title="White"></div>
+        <div class="divider"></div>
+        <span class="draw-label">SIZE</span>
+        <input type="range" class="width-slider" id="width-slider" min="2" max="20" value="4" oninput="setWidth(this.value)">
+        <span id="width-val" style="font-size:12px;color:#5a7a8a;min-width:28px">4px</span>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong style="color:#3a4a5a">Workflow:</strong> Play → Pause on frame → Draw with finger to show corrections → 📸 Save Frame to export as image
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== STATE =====
+let fps = 30, rate = 1, playing = false, videoReady = false;
+let tool = 'draw', drawColor = '#ff3333', lineWidth = 4;
+let isDrawing = false;
+let strokes = [];
+let currentStroke = [];
+
+const V = document.getElementById('vid');
+const CW = document.getElementById('canvas-wrap');
+const canvas = document.getElementById('draw-canvas');
+const ctx = canvas.getContext('2d');
+
+function fmT(s) { if(isNaN(s)) return'--:--.--'; return Math.floor(s/60)+':'+(s%60).toFixed(2).padStart(5,'0'); }
+function fn(s) { return Math.round(s * fps); }
+
+function showStatus(msg, type) {
+  const el = document.getElementById('status-bar');
+  el.textContent = msg; el.className = type;
+}
+
+// ===== MODE UPDATES =====
+function updateMode() {
+  const md = document.getElementById('mode-display');
+  const pb2 = document.getElementById('play-btn2');
+  if (playing) {
+    CW.classList.remove('drawing');
+    md.className = 'mode-display mode-play'; md.textContent = '▶ PLAY';
+    pb2.textContent = 'Pause to draw';
+  } else if (tool === 'erase') {
+    CW.classList.add('drawing');
+    md.className = 'mode-display mode-erase'; md.textContent = '🧹 ERASE';
+    pb2.textContent = '⏸ PAUSED — erasing';
+  } else {
+    CW.classList.add('drawing');
+    md.className = 'mode-display mode-draw'; md.textContent = '✏️ DRAW';
+    pb2.textContent = '⏸ PAUSED — draw on video';
+  }
+}
+
+// ===== FILE LOADING =====
+document.getElementById('file-input').addEventListener('change', function(e) {
+  const f = e.target.files[0]; if (!f) return;
+  showStatus('Loading ' + f.name + '...', 'loading');
+  document.getElementById('upload-zone').style.display = 'none';
+  document.getElementById('player-area').style.display = 'block';
+  V.src = URL.createObjectURL(f);
+  V.load();
+  videoReady = false; strokes = []; currentStroke = [];
+});
+
+// ===== VIDEO EVENTS =====
+V.addEventListener('loadedmetadata', function() {
+  showStatus('Loaded: ' + V.videoWidth + '×' + V.videoHeight + ' · ' + V.duration.toFixed(1) + 's', 'loading');
+  resizeCanvas();
+});
+V.addEventListener('loadeddata', function() {
+  videoReady = true; updateHUD();
+  showStatus('Ready — tap Play', 'ready');
+});
+V.addEventListener('canplay', function() {
+  videoReady = true; resizeCanvas();
+  showStatus('Ready', 'ready');
+});
+V.addEventListener('error', function() {
+  const err = V.error; let msg = 'Error: ';
+  if (err) { switch(err.code){ case 3: msg+='Decoding error'; break; case 4: msg+='Format not supported'; break; default: msg+='Code '+err.code; }}
+  showStatus(msg, 'error');
+});
+V.addEventListener('play', function() {
+  playing = true;
+  document.getElementById('play-btn').className = 'btn btn-pause';
+  document.getElementById('play-btn').innerHTML = '⏸ PAUSE';
+  updateMode();
+  if (V.requestVideoFrameCallback) V.requestVideoFrameCallback(onVF);
+});
+V.addEventListener('pause', function() {
+  playing = false;
+  document.getElementById('play-btn').className = 'btn btn-play';
+  document.getElementById('play-btn').innerHTML = '▶ PLAY';
+  updateMode();
+});
+V.addEventListener('ended', function() {
+  playing = false;
+  document.getElementById('play-btn').className = 'btn btn-play';
+  document.getElementById('play-btn').innerHTML = '▶ PLAY';
+  updateMode();
+});
+
+// Tap video to play/pause
+V.addEventListener('click', function() { if (videoReady) toggle(); });
+
+// ===== CANVAS SIZING =====
+function resizeCanvas() {
+  const rect = V.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redrawAll();
+}
+window.addEventListener('resize', function() { if (V.src) resizeCanvas(); });
+
+// ===== FPS DETECTION =====
+let fpsSamples = [];
+function onVF(now, meta) {
+  updateHUD();
+  fpsSamples.push(meta.mediaTime);
+  if (fpsSamples.length > 20) {
+    const d = [];
+    for (let i=1; i<fpsSamples.length; i++) { const x=fpsSamples[i]-fpsSamples[i-1]; if(x>.001&&x<.2) d.push(x); }
+    if (d.length > 10) {
+      const avg = d.reduce((a,b)=>a+b,0)/d.length;
+      const det = Math.round(1/avg);
+      if (det>10 && det<240) fps = det;
+    }
+    fpsSamples = fpsSamples.slice(-10);
+  }
+  if (!V.paused && V.requestVideoFrameCallback) V.requestVideoFrameCallback(onVF);
+}
+setInterval(function() { if (V.src && V.readyState > 0) updateHUD(); }, 80);
+
+function updateHUD() {
+  document.getElementById('time-display').textContent = fmT(V.currentTime);
+  document.getElementById('frame-num').textContent = fn(V.currentTime);
+  const sd = document.getElementById('speed-display');
+  sd.textContent = rate.toFixed(2) + 'x';
+  sd.className = 'speed-display' + (rate === 1 ? '' : ' changed');
+}
+
+// ===== CONTROLS =====
+function toggle() { playing ? V.pause() : V.play(); }
+function step(n) { V.pause(); V.currentTime = Math.max(0, Math.min(V.duration, V.currentTime + n/fps)); updateHUD(); }
+function nudge(s) { V.currentTime = Math.max(0, Math.min(V.duration, V.currentTime + s)); updateHUD(); }
+
+const speeds = [0.1, 0.25, 0.5, 1, 2, 4, 10];
+function setSpd(r) {
+  rate = r; V.playbackRate = r; updateHUD();
+  speeds.forEach(function(s) {
+    const id = 'spd-' + String(s).replace('.','');
+    const el = document.getElementById(id);
+    if (el) el.className = 'btn btn-sm' + (Math.abs(rate-s)<.01 ? ' btn-on' : '');
+  });
+}
+
+// ===== DRAWING =====
+function setTool(t) {
+  tool = t;
+  document.getElementById('tool-draw').style.background = t==='draw' ? 'rgba(255,215,64,.12)' : 'rgba(255,255,255,.04)';
+  document.getElementById('tool-draw').style.borderColor = t==='draw' ? '#ffd740' : 'rgba(255,255,255,.08)';
+  document.getElementById('tool-draw').style.color = t==='draw' ? '#ffd740' : '#7a8a9a';
+  document.getElementById('tool-erase').style.background = t==='erase' ? 'rgba(255,82,82,.12)' : 'rgba(255,255,255,.04)';
+  document.getElementById('tool-erase').style.borderColor = t==='erase' ? '#ff5252' : 'rgba(255,255,255,.08)';
+  document.getElementById('tool-erase').style.color = t==='erase' ? '#ff5252' : '#7a8a9a';
+  updateMode();
+}
+
+function setColor(c) {
+  drawColor = c;
+  document.querySelectorAll('.swatch').forEach(function(el) { el.classList.toggle('on', el.id === 'sw-' + c); });
+  if (tool === 'erase') setTool('draw');
+}
+
+function setWidth(v) {
+  lineWidth = parseInt(v);
+  document.getElementById('width-val').textContent = lineWidth + 'px';
+}
+
+// ===== TOUCH / MOUSE DRAWING =====
+function getPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  if (e.touches) return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+function startDraw(e) {
+  if (playing) return;
+  e.preventDefault();
+  isDrawing = true;
+  const pos = getPos(e);
+  currentStroke = [{ x:pos.x, y:pos.y, color: tool==='erase'?'erase':drawColor, width: tool==='erase'?lineWidth*4:lineWidth, tool:tool }];
+}
+
+function moveDraw(e) {
+  if (!isDrawing || playing) return;
+  e.preventDefault();
+  const pos = getPos(e);
+  const prev = currentStroke[currentStroke.length - 1];
+
+  if (tool === 'erase') {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.strokeStyle = 'rgba(0,0,0,1)';
+    ctx.lineWidth = lineWidth * 4;
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = drawColor;
+    ctx.lineWidth = lineWidth;
+  }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(pos.x, pos.y); ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+
+  currentStroke.push({ x:pos.x, y:pos.y, color: tool==='erase'?'erase':drawColor, width: tool==='erase'?lineWidth*4:lineWidth, tool:tool });
+}
+
+function endDraw(e) {
+  if (!isDrawing) return;
+  e.preventDefault(); isDrawing = false;
+  if (currentStroke.length > 1) strokes.push(currentStroke.slice());
+  currentStroke = [];
+}
+
+canvas.addEventListener('touchstart', startDraw, { passive: false });
+canvas.addEventListener('touchmove', moveDraw, { passive: false });
+canvas.addEventListener('touchend', endDraw, { passive: false });
+canvas.addEventListener('touchcancel', endDraw, { passive: false });
+canvas.addEventListener('mousedown', startDraw);
+canvas.addEventListener('mousemove', moveDraw);
+canvas.addEventListener('mouseup', endDraw);
+canvas.addEventListener('mouseleave', endDraw);
+
+// ===== UNDO / CLEAR / REDRAW =====
+function redrawAll() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  strokes.forEach(function(stroke) {
+    if (stroke.length < 2) return;
+    for (let i = 1; i < stroke.length; i++) {
+      const prev = stroke[i-1], pt = stroke[i];
+      if (pt.tool === 'erase') { ctx.globalCompositeOperation = 'destination-out'; ctx.strokeStyle = 'rgba(0,0,0,1)'; }
+      else { ctx.globalCompositeOperation = 'source-over'; ctx.strokeStyle = pt.color; }
+      ctx.lineWidth = pt.width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(pt.x, pt.y); ctx.stroke();
+    }
+  });
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function undoDraw() { if (strokes.length) { strokes.pop(); resizeCanvas(); } }
+function clearDraw() { strokes = []; ctx.clearRect(0, 0, canvas.width, canvas.height); }
+
+// ===== SAVE =====
+function saveFrame() {
+  const rect = V.getBoundingClientRect();
+  const sc = document.createElement('canvas');
+  sc.width = V.videoWidth; sc.height = V.videoHeight;
+  const sctx = sc.getContext('2d');
+  sctx.drawImage(V, 0, 0, V.videoWidth, V.videoHeight);
+
+  const sx = V.videoWidth / rect.width, sy = V.videoHeight / rect.height;
+  strokes.forEach(function(stroke) {
+    if (stroke.length < 2) return;
+    for (let i = 1; i < stroke.length; i++) {
+      const prev = stroke[i-1], pt = stroke[i];
+      if (pt.tool === 'erase') continue;
+      sctx.strokeStyle = pt.color;
+      sctx.lineWidth = pt.width * sx;
+      sctx.lineCap = 'round'; sctx.lineJoin = 'round';
+      sctx.beginPath(); sctx.moveTo(prev.x * sx, prev.y * sy); sctx.lineTo(pt.x * sx, pt.y * sy); sctx.stroke();
+    }
+  });
+
+  const link = document.createElement('a');
+  link.download = 'swim-frame-' + fn(V.currentTime) + '.png';
+  link.href = sc.toDataURL('image/png');
+  link.click();
+}
+
+// ===== KEYBOARD (Mac) =====
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT') return;
+  switch(e.key) {
+    case ' ': e.preventDefault(); toggle(); break;
+    case 'ArrowRight': e.preventDefault(); step(e.shiftKey ? 10 : 1); break;
+    case 'ArrowLeft': e.preventDefault(); step(e.shiftKey ? -10 : -1); break;
+    case 'd': case 'D': setTool('draw'); break;
+    case 'e': case 'E': setTool('erase'); break;
+    case 'z': case 'Z': if(e.metaKey||e.ctrlKey) undoDraw(); break;
+  }
+});
+</script>
+</body>
+</html>
