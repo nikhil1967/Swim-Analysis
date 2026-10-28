@@ -145,7 +145,8 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
       <div class="setup-row">
         <span class="setup-label">Camera</span>
         <div class="u-toggle" id="cam-toggle">
-          <button id="cam-fixed" class="on" onclick="setCamMode('fixed')">Fixed / Stationary</button>
+          <button id="cam-fixed" class="on" onclick="setCamMode('fixed')">Side View</button>
+          <button id="cam-endon" onclick="setCamMode('endon')">End-on / Behind Blocks</button>
           <button id="cam-follow" onclick="setCamMode('follow')">Walking with Swimmer</button>
         </div>
       </div>
@@ -374,7 +375,8 @@ let detectedStroke='unknown',speedUnit='yd/s';
 let camMode='fixed'; // 'fixed' or 'follow'
 let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
 let beepTime=-1,blockDepartTime=-1,wallTouches=[]; // timing events
-let laneY=-1,laneH=0.20; // lane region: center Y (0-1) and half-height (fraction of frame)
+let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
+let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width
 let selectingLane=false;
 let strokeDetectOn=true;
 
@@ -397,8 +399,13 @@ function setCourse(c){
 function setCamMode(m){
   camMode=m;
   document.getElementById('cam-fixed').className=m==='fixed'?'on':'';
+  document.getElementById('cam-endon').className=m==='endon'?'on':'';
   document.getElementById('cam-follow').className=m==='follow'?'on':'';
-  document.getElementById('pool-mark-row').style.display=m==='fixed'?'flex':'none';
+  document.getElementById('pool-mark-row').style.display=(m==='fixed'||m==='endon')?'flex':'none';
+  // Update lane button text based on mode
+  if(laneY<0&&laneX<0){
+    document.getElementById('lane-btn').textContent=m==='endon'?'👆 Tap Swimmer\'s Lane':'👆 Tap Swimmer on Video';
+  }
   updateSetup();
 }
 function setStrokeDetect(on){
@@ -459,17 +466,27 @@ function startLaneSelect(){
 function handleLaneSelect(e){
   if(!selectingLane)return;
   const rect=V.getBoundingClientRect();
-  const yPct=(e.clientY-rect.top)/rect.height; // 0-1
-  laneY=Math.max(0.1,Math.min(0.9,yPct));
+  if(camMode==='endon'){
+    // End-on camera: vertical band (X position = which lane)
+    const xPct=(e.clientX-rect.left)/rect.width;
+    laneX=Math.max(0.05,Math.min(0.95,xPct));
+    laneY=-1; // clear horizontal band
+    document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneX*100)+'% X';
+  } else {
+    // Side view: horizontal band (Y position)
+    const yPct=(e.clientY-rect.top)/rect.height;
+    laneY=Math.max(0.1,Math.min(0.9,yPct));
+    laneX=-1; // clear vertical band
+    document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'% Y';
+  }
   selectingLane=false;
-  document.getElementById('lane-btn').textContent='👆 Tap Swimmer on Video';
+  document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Swimmer\'s Lane':'👆 Tap Swimmer on Video';
   document.getElementById('lane-btn').style.color='';
-  document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'%';
   document.getElementById('lane-clear-btn').style.display='inline-flex';
   drawLaneOverlay();
 }
 function clearLane(){
-  laneY=-1;selectingLane=false;
+  laneY=-1;laneX=-1;selectingLane=false;
   document.getElementById('lane-val').textContent='All (no filter)';
   document.getElementById('lane-clear-btn').style.display='none';
   drawLaneOverlay();
@@ -483,25 +500,34 @@ function drawLaneOverlay(){
   const lx=lo.getContext('2d');
   lx.setTransform(dpr,0,0,dpr,0,0);
   lx.clearRect(0,0,rect.width,rect.height);
-  if(laneY<0)return;
 
-  const h=rect.height;
-  const top=Math.max(0,(laneY-laneH)*h);
-  const bot=Math.min(h,(laneY+laneH)*h);
+  const w=rect.width,h=rect.height;
 
-  // Dim everything outside the lane
-  lx.fillStyle='rgba(0,0,0,0.5)';
-  lx.fillRect(0,0,rect.width,top);
-  lx.fillRect(0,bot,rect.width,h-bot);
-
-  // Lane border
-  lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
-  lx.strokeRect(0,top,rect.width,bot-top);
-  lx.setLineDash([]);
-
-  // Label
-  lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
-  lx.fillText('SELECTED LANE',6,top+14);
+  if(laneX>=0){
+    // End-on mode: vertical band
+    const left=Math.max(0,(laneX-laneW)*w);
+    const right=Math.min(w,(laneX+laneW)*w);
+    lx.fillStyle='rgba(0,0,0,0.5)';
+    lx.fillRect(0,0,left,h);
+    lx.fillRect(right,0,w-right,h);
+    lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
+    lx.strokeRect(left,0,right-left,h);
+    lx.setLineDash([]);
+    lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
+    lx.fillText('SELECTED LANE',left+6,14);
+  } else if(laneY>=0){
+    // Side view: horizontal band
+    const top=Math.max(0,(laneY-laneH)*h);
+    const bot=Math.min(h,(laneY+laneH)*h);
+    lx.fillStyle='rgba(0,0,0,0.5)';
+    lx.fillRect(0,0,w,top);
+    lx.fillRect(0,bot,w,h-bot);
+    lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
+    lx.strokeRect(0,top,w,bot-top);
+    lx.setLineDash([]);
+    lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
+    lx.fillText('SELECTED LANE',6,top+14);
+  }
 }
 function setHU(u){
   hUnit=u;document.getElementById('hu-imp').className=u==='imp'?'on':'';document.getElementById('hu-met').className=u==='met'?'on':'';
@@ -614,9 +640,12 @@ function setSpd(r){rate=r;V.playbackRate=r;updateHUD();speeds.forEach(function(s
 async function scanVideo(){
   if(scanning||!videoReady)return;
   // Prompt to select swimmer if none selected
-  if(laneY<0){
-    const go=confirm('No swimmer selected — analysis will track ALL motion in frame.\n\nFor best results, tap "👆 Tap Swimmer on Video" first to isolate your swimmer.\n\nScan anyway?');
-    if(!go)return;
+  const noLane=(camMode==='endon')?laneX<0:laneY<0;
+  if(noLane){
+    const msg=camMode==='endon'
+      ?'No lane selected — analysis will track ALL motion in frame.\n\nFor best results, tap "👆 Tap Swimmer\'s Lane" first to isolate your swimmer\'s lane.\n\nScan anyway?'
+      :'No swimmer selected — analysis will track ALL motion in frame.\n\nFor best results, tap "👆 Tap Swimmer on Video" first to isolate your swimmer.\n\nScan anyway?';
+    if(!confirm(msg))return;
   }
   scanning=true;scanned=false;flowData=[];motionData=[];
 
@@ -630,8 +659,18 @@ async function scanVideo(){
   sC.width=sw;sC.height=sh;
 
   // Stroke rhythm region: use lane band if selected, otherwise center 50%
-  const centerY=laneY>=0?Math.max(0,Math.floor((laneY-laneH)*sh)):Math.floor(sh*0.25);
-  const centerH=laneY>=0?Math.min(sh,Math.floor((laneY+laneH)*sh))-centerY:Math.floor(sh*0.5);
+  let centerY,centerH,centerX=0,centerW=sw;
+  if(camMode==='endon'&&laneX>=0){
+    // End-on: vertical band for lane, full height for stroke detection
+    centerX=Math.max(0,Math.floor((laneX-laneW)*sw));
+    centerW=Math.min(sw,Math.floor((laneX+laneW)*sw))-centerX;
+    centerY=0;centerH=sh;
+  } else if(laneY>=0){
+    centerY=Math.max(0,Math.floor((laneY-laneH)*sh));
+    centerH=Math.min(sh,Math.floor((laneY+laneH)*sh))-centerY;
+  } else {
+    centerY=Math.floor(sh*0.25);centerH=Math.floor(sh*0.5);
+  }
 
   // For follow mode: background strips
   const numStrips=8,stripH=Math.floor(sh*0.08),strips=[];
@@ -651,29 +690,42 @@ async function scanVideo(){
     });
 
     sx.drawImage(V,0,0,sw,sh);
-    const centerData=sx.getImageData(0,centerY,sw,centerH).data;
+    const centerData=sx.getImageData(centerX,centerY,centerW,centerH).data;
 
     if(i>0){
-      if(camMode==='fixed'){
-        // FIXED CAMERA: find swimmer via motion centroid
+      if(camMode==='fixed'||camMode==='endon'){
+        // FIXED/END-ON CAMERA: find swimmer via motion centroid
         const frameData=sx.getImageData(0,0,sw,sh).data;
         if(prevFrame){
-          let motionWX=0,motionTotal=0;
+          let motionWX=0,motionWY=0,motionTotal=0;
           const step=2;
-          // Lane filter: restrict Y range if a lane is selected
-          const yStart=laneY>=0?Math.max(0,Math.floor((laneY-laneH)*sh)):0;
-          const yEnd=laneY>=0?Math.min(sh,Math.floor((laneY+laneH)*sh)):sh;
+          // Lane filter: restrict to selected region
+          let yStart=0,yEnd=sh,xStart=0,xEnd=sw;
+          if(camMode==='endon'&&laneX>=0){
+            xStart=Math.max(0,Math.floor((laneX-laneW)*sw));
+            xEnd=Math.min(sw,Math.floor((laneX+laneW)*sw));
+          } else if(laneY>=0){
+            yStart=Math.max(0,Math.floor((laneY-laneH)*sh));
+            yEnd=Math.min(sh,Math.floor((laneY+laneH)*sh));
+          }
           for(let y=yStart;y<yEnd;y+=step){
-            for(let x=0;x<sw;x+=step){
+            for(let x=xStart;x<xEnd;x+=step){
               const idx=(y*sw+x)*4;
               const diff=Math.abs(frameData[idx]-prevFrame[idx])
                         +Math.abs(frameData[idx+1]-prevFrame[idx+1])
                         +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
-              if(diff>40){motionWX+=x*diff;motionTotal+=diff}
+              if(diff>40){motionWX+=x*diff;motionWY+=y*diff;motionTotal+=diff}
             }
           }
-          const swimmerX=motionTotal>0?motionWX/motionTotal:sw/2;
-          rawDisplacements.push({time:t,posX:swimmerX/sw});
+          if(camMode==='endon'){
+            // End-on: track Y position (swimmer moves toward/away from camera)
+            const swimmerY=motionTotal>0?motionWY/motionTotal:sh/2;
+            rawDisplacements.push({time:t,posX:swimmerY/sh}); // store as posX for compatibility
+          } else {
+            // Side view: track X position
+            const swimmerX=motionTotal>0?motionWX/motionTotal:sw/2;
+            rawDisplacements.push({time:t,posX:swimmerX/sw});
+          }
         }
         prevFrame=new Uint8ClampedArray(frameData);
 
@@ -698,10 +750,10 @@ async function scanVideo(){
       if(prevCenter){
         let cMot=0,leftMot=0,rightMot=0;
         const step=4;
-        const halfW=Math.floor(sw/2);
+        const halfW=Math.floor(centerW/2);
         for(let row=0;row<centerH;row+=2){
-          for(let col=0;col<sw;col+=2){
-            const p=(row*sw+col)*4;
+          for(let col=0;col<centerW;col+=2){
+            const p=(row*centerW+col)*4;
             const g=(centerData[p]+centerData[p+1]+centerData[p+2])/3;
             const pg=(prevCenter[p]+prevCenter[p+1]+prevCenter[p+2])/3;
             const d=Math.abs(g-pg);
@@ -709,7 +761,7 @@ async function scanVideo(){
             if(col<halfW)leftMot+=d; else rightMot+=d;
           }
         }
-        const nPix=(centerH/2)*(sw/2);
+        const nPix=(centerH/2)*(centerW/2);
         cMot/=nPix;leftMot/=(nPix/2);rightMot/=(nPix/2);
 
         if(camMode==='follow'){
@@ -866,7 +918,7 @@ async function scanVideo(){
   scanning=false;scanned=true;
   btn.className='scan-btn';btn.textContent='🔍 Rescan';btn.disabled=false;
   progress.style.width='0%';
-  document.getElementById('scan-st').textContent='Done · '+(camMode==='fixed'?'Fixed cam':'Following')+' mode';
+  document.getElementById('scan-st').textContent='Done · '+(camMode==='fixed'?'Side view':camMode==='endon'?'End-on':'Following')+' mode';
   document.getElementById('xa-tog').style.display='flex';
   document.getElementById('motion-box').style.display=strokeDetectOn?'block':'none';
 
@@ -1310,7 +1362,7 @@ function resetVideo(){
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
   poolStartX=-1;poolFarX=-1;markingWall=null;
-  laneY=-1;selectingLane=false;
+  laneY=-1;laneX=-1;selectingLane=false;
 
   // Reset UI
   document.getElementById('player-area').style.display='none';
@@ -1432,7 +1484,7 @@ async function detectBeep(){
 
 // ===== WALL TURN DETECTION from position data =====
 function detectWallTurns(rawDisplacements,sampleFps){
-  if(camMode!=='fixed'||rawDisplacements.length<20)return [];
+  if((camMode!=='fixed'&&camMode!=='endon')||rawDisplacements.length<20)return [];
 
   // Smooth positions heavily for wall detection
   const posArr=rawDisplacements.map(function(d){return d.posX});
