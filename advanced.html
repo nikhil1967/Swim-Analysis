@@ -377,7 +377,9 @@ let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far w
 let beepTime=-1,blockDepartTime=-1,wallTouches=[]; // timing events
 let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
 let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width
+let laneX1=-1,laneX2=-1;  // end-on: two rope taps define the lane exactly
 let selectingLane=false;
+let laneTapCount=0; // for two-tap lane selection in end-on mode
 let strokeDetectOn=true;
 
 // Course definitions: pool length per lap (wall to wall)
@@ -404,7 +406,7 @@ function setCamMode(m){
   document.getElementById('pool-mark-row').style.display=(m==='fixed'||m==='endon')?'flex':'none';
   // Update lane button text based on mode
   if(laneY<0&&laneX<0){
-    document.getElementById('lane-btn').textContent=m==='endon'?'👆 Tap Swimmer\'s Lane':'👆 Tap Swimmer on Video';
+    document.getElementById('lane-btn').textContent=m==='endon'?'👆 Tap Lane Ropes':'👆 Tap Swimmer on Video';
   }
   updateSetup();
 }
@@ -459,39 +461,61 @@ function handlePoolMark(e){
 }
 function startLaneSelect(){
   selectingLane=true;
+  laneTapCount=0;
+  laneX1=-1;laneX2=-1;
   V.pause();
-  document.getElementById('lane-btn').textContent='👆 Tap on your swimmer...';
+  if(camMode==='endon'){
+    document.getElementById('lane-btn').textContent='👆 Tap LEFT lane rope...';
+  } else {
+    document.getElementById('lane-btn').textContent='👆 Tap on your swimmer...';
+  }
   document.getElementById('lane-btn').style.color='#ffd740';
 }
 function handleLaneSelect(e){
   if(!selectingLane)return;
   const rect=V.getBoundingClientRect();
   if(camMode==='endon'){
-    // End-on camera: vertical band (X position = which lane)
+    // End-on camera: two taps to define lane between ropes
     const xPct=(e.clientX-rect.left)/rect.width;
-    laneX=Math.max(0.05,Math.min(0.95,xPct));
-    laneY=-1; // clear horizontal band
-    document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneX*100)+'% X';
+    if(laneTapCount===0){
+      laneX1=xPct;
+      laneTapCount=1;
+      document.getElementById('lane-btn').textContent='👆 Now tap RIGHT lane rope...';
+      // Show temporary marker
+      drawLaneOverlay(xPct);
+      return; // wait for second tap
+    } else {
+      laneX2=xPct;
+      // Set lane band from the two rope positions
+      const left=Math.min(laneX1,laneX2);
+      const right=Math.max(laneX1,laneX2);
+      laneX=(left+right)/2;
+      laneW=(right-left)/2;
+      laneY=-1;
+      document.getElementById('lane-val').textContent='Lane '+Math.round(left*100)+'%-'+Math.round(right*100)+'%';
+    }
   } else {
-    // Side view: horizontal band (Y position)
+    // Side view: single tap horizontal band (Y position)
     const yPct=(e.clientY-rect.top)/rect.height;
     laneY=Math.max(0.1,Math.min(0.9,yPct));
-    laneX=-1; // clear vertical band
-    document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'% Y';
+    laneX=-1;
+    document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'%';
   }
   selectingLane=false;
-  document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Swimmer\'s Lane':'👆 Tap Swimmer on Video';
+  laneTapCount=0;
+  document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Lane Ropes':'👆 Tap Swimmer on Video';
   document.getElementById('lane-btn').style.color='';
   document.getElementById('lane-clear-btn').style.display='inline-flex';
   drawLaneOverlay();
 }
 function clearLane(){
-  laneY=-1;laneX=-1;selectingLane=false;
+  laneY=-1;laneX=-1;laneX1=-1;laneX2=-1;laneTapCount=0;selectingLane=false;
   document.getElementById('lane-val').textContent='All (no filter)';
   document.getElementById('lane-clear-btn').style.display='none';
+  document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Lane Ropes':'👆 Tap Swimmer on Video';
   drawLaneOverlay();
 }
-function drawLaneOverlay(){
+function drawLaneOverlay(firstTapX){
   const lo=document.getElementById('lane-overlay');
   const rect=V.getBoundingClientRect();
   const dpr=window.devicePixelRatio||1;
@@ -503,8 +527,19 @@ function drawLaneOverlay(){
 
   const w=rect.width,h=rect.height;
 
+  // Show first rope tap marker while waiting for second tap
+  if(firstTapX!==undefined&&firstTapX>=0){
+    const x=firstTapX*w;
+    lx.strokeStyle='rgba(0,229,255,0.8)';lx.lineWidth=2;lx.setLineDash([4,3]);
+    lx.beginPath();lx.moveTo(x,0);lx.lineTo(x,h);lx.stroke();
+    lx.setLineDash([]);
+    lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 10px IBM Plex Mono';
+    lx.fillText('LEFT ROPE ✓',x+4,16);
+    return;
+  }
+
   if(laneX>=0){
-    // End-on mode: vertical band
+    // End-on mode: vertical band between two ropes
     const left=Math.max(0,(laneX-laneW)*w);
     const right=Math.min(w,(laneX+laneW)*w);
     lx.fillStyle='rgba(0,0,0,0.5)';
@@ -1362,7 +1397,7 @@ function resetVideo(){
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
   poolStartX=-1;poolFarX=-1;markingWall=null;
-  laneY=-1;laneX=-1;selectingLane=false;
+  laneY=-1;laneX=-1;laneX1=-1;laneX2=-1;laneTapCount=0;selectingLane=false;
 
   // Reset UI
   document.getElementById('player-area').style.display='none';
