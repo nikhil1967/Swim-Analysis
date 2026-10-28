@@ -743,7 +743,7 @@ async function scanVideo(){
     // Fixed camera: swimmer position in normalized x (0-1)
     // Step 1: Smooth posX with a wide median+mean filter to remove noise
     const posArr=rawDisplacements.map(function(d){return d.posX});
-    const smoothR=4; // ±4 frames at 15fps = ±0.27s
+    const smoothR=7; // ±7 frames at 15fps = ±0.47s
     const smoothPos=posArr.map(function(_,i){
       const lo=Math.max(0,i-smoothR),hi=Math.min(posArr.length-1,i+smoothR);
       const window=[];
@@ -784,7 +784,7 @@ async function scanVideo(){
   }
 
   // Smooth speed with wider window
-  const win=5; // ±5 frames at 15fps = ±0.33s window
+  const win=8; // ±8 frames at 15fps = ±1.07s window
   flowData=[];let cumDist=0;
   for(let i=0;i<rawSpeeds.length;i++){
     let sum=0,cnt=0;
