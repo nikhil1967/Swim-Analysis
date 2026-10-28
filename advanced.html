@@ -1512,16 +1512,54 @@ function detectWallTurns(rawDisplacements,sampleFps){
   const farWallX=poolFarX>=0?poolFarX:(startIsLeft?maxX:minX);
   const midX=(startWallX+farWallX)/2;
 
-  // Label each turn
-  const turns=rawTurns.map(function(t){
+  // Flag zone: 5yd/5m from each wall = fraction of pool span
+  const lapLen=getLapLen(); // e.g. 25 for SCY
+  const flagDist=5; // flags are always 5 units from the wall
+  const flagFrac=lapLen>0?flagDist/lapLen:0.2; // fraction of pool length
+  const poolSpan=Math.abs(farWallX-startWallX)||0.8;
+  const flagOffsetNorm=flagFrac*poolSpan; // in normalized x units
+
+  // Label each turn and extract turn analysis data
+  const turns=rawTurns.map(function(t,ti){
     const isLeftWall=t.posX<midX;
     const isStartWall=startIsLeft?isLeftWall:!isLeftWall;
+    const wallX=isStartWall?startWallX:farWallX;
+
+    // --- Turn analysis data (for future module) ---
+    // Flag crossing: find when swimmer entered the flag zone before this turn
+    // Flag zone boundary = wallX ± flagOffsetNorm (toward pool center)
+    const flagX=wallX+(wallX<midX?flagOffsetNorm:-flagOffsetNorm);
+    let flagTime=-1;
+    // Search backward from turn to find when swimmer crossed the flag line
+    for(let k=t.index-1;k>=0;k--){
+      const approaching=wallX<midX?(smoothPos[k]>flagX):(smoothPos[k]<flagX);
+      if(approaching){
+        flagTime=rawDisplacements[Math.min(k+1,rawDisplacements.length-1)].time;
+        break;
+      }
+    }
+
+    // Breakout: after the turn, find when motion energy resumes (swimmer resurfaces)
+    // Underwater = low motion energy; breakout = energy rises back to swimming level
+    let breakoutTime=-1,breakoutPosX=-1;
+    // Will be populated by future turn analysis module
+    // For now, store the raw index range for later processing
+    const nextTurnI=ti<rawTurns.length-1?rawTurns[ti+1].index:smoothPos.length-1;
+
     return{
       time:t.time,
       posX:t.posX,
       index:t.index,
       wall:isStartWall?'start':'far',
-      label:isStartWall?'Start Wall':'Far Wall'
+      label:isStartWall?'Start Wall':'Far Wall',
+      // Turn analysis fields
+      wallX:wallX,
+      flagX:flagX,
+      flagTime:flagTime,           // when swimmer crossed the flags approaching wall
+      breakoutTime:breakoutTime,   // when swimmer resurfaced (future)
+      breakoutPosX:breakoutPosX,   // where swimmer resurfaced (future)
+      approachRange:[flagTime>=0?Math.floor(flagTime*sampleFps):t.index-10, t.index],
+      exitRange:[t.index, nextTurnI] // index range for underwater/breakout search
     };
   });
 
@@ -1658,7 +1696,12 @@ function showTimingEvents(){
       const el=document.createElement('div');
       el.className='wt-item';
       const wallLabel=w.label||('Wall '+(i+1));
-      el.innerHTML=wallLabel+' <small>#'+(i+1)+'</small>: '+fmT(w.time);
+      let extra='';
+      if(w.flagTime>=0){
+        const approach=((w.time-w.flagTime)).toFixed(2);
+        extra=' <small style="color:#ffd740">flags→wall '+approach+'s</small>';
+      }
+      el.innerHTML=wallLabel+' <small>#'+(i+1)+'</small>: '+fmT(w.time)+extra;
       el.onclick=function(){V.currentTime=w.time;V.pause();updateHUD();drawGraph();drawMotionGraph()};
       row.appendChild(el);
     });
