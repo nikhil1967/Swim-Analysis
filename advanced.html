@@ -206,7 +206,7 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
         <span id="mark-start-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
         <button class="btn btn-sm" id="mark-far-btn" onclick="startMark('far')" style="font-size:10px">Tap Far Wall ↔</button>
         <span id="mark-far-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
-        <span class="setup-unit" style="color:#3a5a6a">← blocks = start wall</span>
+        <span class="setup-unit" style="color:#3a5a6a">← optional, auto-detected from scan</span>
       </div>
       <div class="setup-row">
         <span class="setup-label">Height</span>
@@ -1484,17 +1484,28 @@ function detectWallTurns(rawDisplacements,sampleFps){
   if(rawTurns.length===0)return [];
 
   // Classify each turn: which wall is it?
-  // Determine start wall from swimmer's initial position (block departure side)
-  // The swimmer's first frames give the start wall x-position
+  // Determine start wall: use pool marks if available, otherwise infer
+  // Start wall = blocks. The swimmer's initial position and first movement tell us which side.
   const startPosX=smoothPos[Math.min(5,smoothPos.length-1)];
 
-  // Find the two extremes of swimmer position — these are the two walls
+  // Find the two extremes from turn positions — these approximate the two walls
   const allPosX=rawTurns.map(function(t){return t.posX});
   const minX=Math.min.apply(null,allPosX);
   const maxX=Math.max.apply(null,allPosX);
 
-  // Start wall is whichever extreme the swimmer began near
-  const startIsLeft=Math.abs(startPosX-minX)<Math.abs(startPosX-maxX);
+  // If pool marks set, use them directly. Otherwise:
+  // The first turn is always at the FAR wall (swimmer swims away from blocks first).
+  // So the first turn's position tells us which extreme is the far wall.
+  let startIsLeft;
+  if(poolStartX>=0){
+    startIsLeft=poolStartX<(poolFarX>=0?poolFarX:(minX+maxX)/2);
+  } else if(rawTurns.length>0){
+    // First turn = far wall. If first turn is near minX, far wall is left, so start is right.
+    const firstTurnPos=rawTurns[0].posX;
+    startIsLeft=Math.abs(firstTurnPos-minX)>Math.abs(firstTurnPos-maxX);
+  } else {
+    startIsLeft=Math.abs(startPosX-minX)<Math.abs(startPosX-maxX);
+  }
 
   // Use pool edge markers if available, otherwise use detected extremes
   const startWallX=poolStartX>=0?poolStartX:(startIsLeft?minX:maxX);
