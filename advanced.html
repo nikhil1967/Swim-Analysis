@@ -1646,112 +1646,113 @@ async function detectBeep(){
     }
     if(rmsArr.length<20)return null;
 
-    // Search the first 15 seconds for the beep/horn
-    const maxSearchTime=Math.min(15,V.duration*0.5);
-    const maxIdx=rmsArr.findIndex(function(e){return e.time>maxSearchTime});
-    const searchEnd=maxIdx>0?maxIdx:rmsArr.length;
+    // Typical swim meet recording pattern:
+    //   0-0.3s: quiet (crowd hushed after "take your marks")
+    //   0.3-1.0s: BEEP/HORN — the loudest, sharpest sound at the start
+    //   ~1-2s: brief quiet then splash
+    //   2s+: swimming sounds
+    // The beep is almost always in the first second. Use the very first
+    // 200ms as a quiet baseline, then find the first loud onset after it.
 
     // Log first 2 seconds of RMS for debugging
     var dbgStr='Beep detect RMS (first 2s): ';
-    for(var di=0;di<rmsArr.length&&rmsArr[di].time<2;di+=5){
+    for(var di=0;di<rmsArr.length&&rmsArr[di].time<2;di+=3){
       dbgStr+=rmsArr[di].time.toFixed(2)+':'+rmsArr[di].rms.toFixed(4)+' ';
     }
     console.log(dbgStr);
 
-    // STRATEGY 0: Early beep — if the audio starts loud in the first second
-    // (the horn fires almost immediately), look for the first sustained loud region
-    // Compare the first 1s against the next few seconds
     let beepStart=-1;
-    var earlyEnd=Math.min(searchEnd, Math.floor(1.5/(hopSize/sr)));
-    var laterStart=earlyEnd;
-    var laterEnd=Math.min(searchEnd, Math.floor(8/(hopSize/sr)));
-    if(laterEnd>laterStart+20){
-      // Get the loudness of the "later" period (after potential beep, before swimming)
-      var laterRms=rmsArr.slice(laterStart,laterEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
-      var laterQuiet=laterRms[Math.floor(laterRms.length*0.3)]; // 30th percentile of 1.5-8s
-      // Look for a sustained burst in the first 1.5s that is louder than the quiet later period
-      var earlyThresh=Math.max(laterQuiet*2, 0.005);
-      var eRun=0, eBest=-1, eBestLen=0;
-      for(var ei=0;ei<earlyEnd;ei++){
-        if(rmsArr[ei].rms>earlyThresh){
-          eRun++;
-          if(eRun>=3&&eBest<0) eBest=ei-eRun+1;
-        } else {
-          if(eRun>=3&&eBest>=0&&eRun>eBestLen){eBestLen=eRun}
-          if(eBest<0) eRun=0;
-          else break; // found end of burst
+
+    // PRIMARY: Use the first 200ms as quiet baseline, find first onset in 0.2-3s
+    // This matches the "take your marks" → beep pattern perfectly.
+    var baseEndIdx=0;
+    for(var bi=0;bi<rmsArr.length;bi++){
+      if(rmsArr[bi].time>0.2){baseEndIdx=bi;break}
+      baseEndIdx=bi;
+    }
+    // Baseline = average RMS of the first 200ms (quiet crowd)
+    var baseSum=0;
+    for(var bi2=0;bi2<baseEndIdx;bi2++) baseSum+=rmsArr[bi2].rms;
+    var baselineRms=baseEndIdx>0?baseSum/baseEndIdx:0;
+
+    // Also compute the peak RMS in the first 3 seconds — the beep is usually the loudest thing
+    var peakRms=0, peakIdx=-1;
+    var searchLimitIdx=rmsArr.length;
+    for(var si=0;si<rmsArr.length;si++){
+      if(rmsArr[si].time>3){searchLimitIdx=si;break}
+    }
+    for(var pi=baseEndIdx;pi<searchLimitIdx;pi++){
+      if(rmsArr[pi].rms>peakRms){peakRms=rmsArr[pi].rms;peakIdx=pi}
+    }
+
+    // Threshold: midpoint between quiet baseline and peak, but at least 1.5× baseline
+    var beepThresh=Math.max(baselineRms*1.5, (baselineRms+peakRms)/2*0.4);
+    // For very quiet recordings (near-digital-silence baseline), use absolute minimum
+    if(baselineRms<0.001) beepThresh=Math.max(0.002, peakRms*0.15);
+
+    console.log('Beep detect: baseline(0-200ms):',baselineRms.toFixed(5),
+      'peak(0.2-3s):',peakRms.toFixed(5),'at',peakIdx>=0?rmsArr[peakIdx].time.toFixed(3):'?',
+      'thresh:',beepThresh.toFixed(5));
+
+    // Find the first moment RMS crosses threshold, sustained for ≥30ms (3 windows)
+    var runLen=0;
+    for(var fi=baseEndIdx;fi<searchLimitIdx;fi++){
+      if(rmsArr[fi].rms>beepThresh){
+        runLen++;
+        if(runLen>=3){
+          beepStart=fi-runLen+1;
+          console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3),'s via primary (baseline+threshold)');
+          break;
         }
-      }
-      if(eBest>=0&&eBestLen>=3){
-        beepStart=eBest;
-        console.log('Beep: Strategy 0 (early burst) at',rmsArr[eBest].time.toFixed(3),'s, thresh:',earlyThresh.toFixed(4),'laterQuiet:',laterQuiet.toFixed(4));
+      } else {
+        runLen=0;
       }
     }
 
-    // STRATEGY 1: Sharp onset detection — biggest volume jump
+    // FALLBACK: If primary didn't find it (maybe baseline wasn't quiet),
+    // look for the sharpest volume jump in the first 5 seconds
     if(beepStart<0){
-      var bestOnset=-1, bestOnsetScore=0;
-      for(var i=3;i<searchEnd-3;i++){
-        // Use fewer "before" windows for early detection (min 2)
-        var bCount=Math.min(3,i);
-        var bSum=0;for(var b=i-bCount;b<i;b++) bSum+=rmsArr[b].rms;
-        var before=bSum/bCount;
-        var after=(rmsArr[i].rms+rmsArr[i+1].rms+rmsArr[i+2].rms)/3;
-        if(before<0.00001){
-          // Near-silence before: use absolute threshold instead of ratio
-          if(after>0.01){
-            var sus=0;
-            for(var j=i;j<Math.min(i+6,rmsArr.length);j++){if(rmsArr[j].rms>0.005)sus++}
-            if(sus>=3){bestOnset=i;bestOnsetScore=after;break}
+      var fallbackEnd=rmsArr.length;
+      for(var fe=0;fe<rmsArr.length;fe++){if(rmsArr[fe].time>5){fallbackEnd=fe;break}}
+      var bestJumpIdx=-1, bestJumpScore=0;
+      for(var ji=2;ji<fallbackEnd-2;ji++){
+        var bef=(rmsArr[ji-2].rms+rmsArr[ji-1].rms)/2;
+        var aft=(rmsArr[ji].rms+rmsArr[ji+1].rms)/2;
+        var jmp=aft-bef;
+        if(jmp>bestJumpScore){
+          // Verify sustained for ≥30ms
+          var sc=0;
+          for(var sj=ji;sj<Math.min(ji+6,rmsArr.length);sj++){
+            if(rmsArr[sj].rms>bef+jmp*0.3)sc++;
           }
-          continue;
-        }
-        var ratio=after/before;
-        var jump=after-before;
-        var score=ratio*jump;
-        if(score>bestOnsetScore&&ratio>2.0){
-          var sus2=0;
-          for(var j2=i;j2<Math.min(i+8,rmsArr.length);j2++){
-            if(rmsArr[j2].rms>before*1.5)sus2++;
-          }
-          if(sus2>=3){
-            bestOnsetScore=score;
-            bestOnset=i;
-          }
+          if(sc>=3){bestJumpScore=jmp;bestJumpIdx=ji}
         }
       }
-      if(bestOnset>=0){
-        beepStart=bestOnset;
-        console.log('Beep: Strategy 1 (onset) at',rmsArr[bestOnset].time.toFixed(3),'s, score:',bestOnsetScore.toFixed(6));
+      if(bestJumpIdx>=0){
+        beepStart=bestJumpIdx;
+        console.log('Beep: found at',rmsArr[bestJumpIdx].time.toFixed(3),'s via fallback (sharpest jump)');
       }
     }
 
-    // STRATEGY 2: Loudest sustained burst in first 15s using quietest 30% as baseline
+    // LAST RESORT: wider search in first 15 seconds
     if(beepStart<0){
-      var earlyRms=rmsArr.slice(0,searchEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
-      var quietBase=earlyRms[Math.floor(earlyRms.length*0.3)];
-      var threshold=Math.max(quietBase*2.5, quietBase+0.003);
-      var burstStart2=-1,burstLen2=0,bestBurst=-1,bestBurstLen=0;
-      for(var i2=0;i2<searchEnd;i2++){
-        if(rmsArr[i2].rms>threshold){
-          if(burstStart2<0)burstStart2=i2;
-          burstLen2++;
-        } else {
-          if(burstLen2>bestBurstLen&&burstLen2>=3){bestBurst=burstStart2;bestBurstLen=burstLen2}
-          burstStart2=-1;burstLen2=0;
-        }
+      var wideEnd=rmsArr.length;
+      for(var we=0;we<rmsArr.length;we++){if(rmsArr[we].time>15){wideEnd=we;break}}
+      var allSort=rmsArr.slice(0,wideEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
+      var q30=allSort[Math.floor(allSort.length*0.3)];
+      var wideThresh=Math.max(q30*2.5, q30+0.003);
+      var wr=0;
+      for(var wi=0;wi<wideEnd;wi++){
+        if(rmsArr[wi].rms>wideThresh){wr++;if(wr>=3&&beepStart<0){beepStart=wi-wr+1;break}}
+        else{wr=0}
       }
-      if(burstLen2>bestBurstLen&&burstLen2>=3){bestBurst=burstStart2;bestBurstLen=burstLen2}
-      if(bestBurst>=0){
-        beepStart=bestBurst;
-        console.log('Beep: Strategy 2 (burst) at',rmsArr[bestBurst].time.toFixed(3),'s, quietBase:',quietBase.toFixed(4),'thresh:',threshold.toFixed(4));
-      }
+      if(beepStart>=0) console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3),'s via last resort (wide search)');
     }
 
     if(beepStart>=0){
       return rmsArr[beepStart]?rmsArr[beepStart].time:beepStart*hopSize/sr;
     }
-    console.log('Beep detection: no beep found in first',maxSearchTime.toFixed(0),'s of audio');
+    console.log('Beep detection: no beep found');
     return null;
   }catch(e){
     console.warn('Beep detection failed:',e);
