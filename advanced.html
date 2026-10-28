@@ -384,6 +384,7 @@ let laneTapCount=0; // tap counter for lane selection
 let ropeTaps=[]; // collects up to 4 taps: [leftA, leftB, rightA, rightB]
 let ropeLeft=null;  // {x1,y1,x2,y2} — left rope line (sorted by y)
 let ropeRight=null; // {x1,y1,x2,y2} — right rope line (sorted by y)
+let waterYmin=0,waterYmax=1; // Y range (0-1) of visible water surface, from tap points
 let strokeDetectOn=true;
 
 // Course definitions: pool length per lap (wall to wall)
@@ -541,8 +542,17 @@ function handleLaneSelect(e){
     const rA=ropeTaps[2],rB=ropeTaps[3];
     if(rA.y<=rB.y) ropeRight={x1:rA.x,y1:rA.y,x2:rB.x,y2:rB.y};
     else ropeRight={x1:rB.x,y1:rB.y,x2:rA.x,y2:rA.y};
+    // Water surface Y bounds: the tapped points define where the pool is visible.
+    // Use the range of all 4 tap Y values, with a small margin to capture full lane width.
+    const allTapYs=ropeTaps.map(function(p){return p.y});
+    const tapYmin=Math.min.apply(null,allTapYs);
+    const tapYmax=Math.max.apply(null,allTapYs);
+    const yMargin=(tapYmax-tapYmin)*0.1; // 10% margin
+    waterYmin=Math.max(0,tapYmin-yMargin);
+    waterYmax=Math.min(1,tapYmax+yMargin);
     // Also set laneX as midpoint for compatibility with code that checks laneX>=0
-    const midBounds=getLaneBoundsAtY(0.5);
+    const midY=(waterYmin+waterYmax)/2;
+    const midBounds=getLaneBoundsAtY(midY);
     if(midBounds){laneX=(midBounds.xLeft+midBounds.xRight)/2;laneW=(midBounds.xRight-midBounds.xLeft)/2}
     laneY=-1;
     document.getElementById('lane-val').textContent='Lane (perspective)';
@@ -596,15 +606,19 @@ function drawLaneOverlay(){
       lx.font='bold 10px IBM Plex Mono';lx.textAlign='left';
       lx.fillText(labels[i],px+10,py-4);
     });
-    // Draw line between first two taps (left rope) if we have both
+    // Draw line between first two taps (left rope) — only between the tapped points, extended slightly
     if(ropeTaps.length>=2){
       const a=ropeTaps[0],b=ropeTaps[1];
       lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=1.5;
-      // Extend line to full video height
       const dy=b.y-a.y,dx=b.x-a.x;
       if(Math.abs(dy)>0.001){
-        const xAtTop=a.x+dx*(0-a.y)/dy, xAtBot=a.x+dx*(1-a.y)/dy;
-        lx.beginPath();lx.moveTo(vr.x+xAtTop*vr.w,vr.y);lx.lineTo(vr.x+xAtBot*vr.w,vr.y+vr.h);lx.stroke();
+        // Extend 30% beyond the tapped range, not to full frame
+        const ext=0.3;
+        const yTop=Math.max(0,Math.min(a.y,b.y)-Math.abs(dy)*ext);
+        const yBot=Math.min(1,Math.max(a.y,b.y)+Math.abs(dy)*ext);
+        const xTop=a.x+dx*(yTop-a.y)/dy;
+        const xBot=a.x+dx*(yBot-a.y)/dy;
+        lx.beginPath();lx.moveTo(vr.x+xTop*vr.w,vr.y+yTop*vr.h);lx.lineTo(vr.x+xBot*vr.w,vr.y+yBot*vr.h);lx.stroke();
       }
     }
     // Draw right rope line if we have 3+ taps
@@ -614,8 +628,12 @@ function drawLaneOverlay(){
         const a=ropeTaps[2],b=ropeTaps[3];
         const dy=b.y-a.y,dx=b.x-a.x;
         if(Math.abs(dy)>0.001){
-          const xAtTop=a.x+dx*(0-a.y)/dy, xAtBot=a.x+dx*(1-a.y)/dy;
-          lx.beginPath();lx.moveTo(vr.x+xAtTop*vr.w,vr.y);lx.lineTo(vr.x+xAtBot*vr.w,vr.y+vr.h);lx.stroke();
+          const ext=0.3;
+          const yTop=Math.max(0,Math.min(a.y,b.y)-Math.abs(dy)*ext);
+          const yBot=Math.min(1,Math.max(a.y,b.y)+Math.abs(dy)*ext);
+          const xTop=a.x+dx*(yTop-a.y)/dy;
+          const xBot=a.x+dx*(yBot-a.y)/dy;
+          lx.beginPath();lx.moveTo(vr.x+xTop*vr.w,vr.y+yTop*vr.h);lx.lineTo(vr.x+xBot*vr.w,vr.y+yBot*vr.h);lx.stroke();
         }
       }
     }
@@ -624,28 +642,27 @@ function drawLaneOverlay(){
   }
 
   if(ropeLeft&&ropeRight){
-    // Perspective lane: draw trapezoid between the two rope lines
-    // Sample bounds at top and bottom of video
-    const topB=getLaneBoundsAtY(0), botB=getLaneBoundsAtY(1);
+    // Perspective lane: draw trapezoid clipped to water surface Y bounds
+    const topB=getLaneBoundsAtY(waterYmin), botB=getLaneBoundsAtY(waterYmax);
     if(topB&&botB){
+      const topPx=vr.y+waterYmin*vr.h, botPx=vr.y+waterYmax*vr.h;
       const tl=vr.x+topB.xLeft*vr.w, tr=vr.x+topB.xRight*vr.w;
       const bl=vr.x+botB.xLeft*vr.w, br=vr.x+botB.xRight*vr.w;
       // Darken outside the trapezoid using clipping
       lx.save();
-      // Draw full dark overlay
       lx.fillStyle='rgba(0,0,0,0.5)';
       lx.beginPath();
       lx.rect(0,0,elW,elH);
       // Cut out the trapezoid (counter-clockwise for even-odd)
-      lx.moveTo(tl,vr.y);lx.lineTo(tr,vr.y);lx.lineTo(br,vr.y+vr.h);lx.lineTo(bl,vr.y+vr.h);lx.closePath();
+      lx.moveTo(tl,topPx);lx.lineTo(tr,topPx);lx.lineTo(br,botPx);lx.lineTo(bl,botPx);lx.closePath();
       lx.fill('evenodd');
       lx.restore();
       // Draw trapezoid outline
       lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
-      lx.beginPath();lx.moveTo(tl,vr.y);lx.lineTo(tr,vr.y);lx.lineTo(br,vr.y+vr.h);lx.lineTo(bl,vr.y+vr.h);lx.closePath();lx.stroke();
+      lx.beginPath();lx.moveTo(tl,topPx);lx.lineTo(tr,topPx);lx.lineTo(br,botPx);lx.lineTo(bl,botPx);lx.closePath();lx.stroke();
       lx.setLineDash([]);
       lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
-      lx.fillText('SELECTED LANE',(tl+tr)/2-40,vr.y+14);
+      lx.fillText('SELECTED LANE',(tl+tr)/2-40,topPx+14);
     }
   } else if(laneX>=0&&!ropeLeft){
     // Legacy vertical band fallback
@@ -843,7 +860,11 @@ async function scanVideo(){
           // Lane filter: restrict to selected region
           const usePerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
           let yStart=0,yEnd=sh;
-          if(!usePerspective&&laneY>=0){
+          if(usePerspective){
+            // Clamp scanning to the water surface Y range
+            yStart=Math.max(0,Math.floor(waterYmin*sh));
+            yEnd=Math.min(sh,Math.floor(waterYmax*sh));
+          } else if(!usePerspective&&laneY>=0){
             yStart=Math.max(0,Math.floor((laneY-laneH)*sh));
             yEnd=Math.min(sh,Math.floor((laneY+laneH)*sh));
           }
@@ -1567,7 +1588,7 @@ function resetVideo(){
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
   poolStartX=-1;poolFarX=-1;markingWall=null;
   laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;
-  ropeTaps=[];ropeLeft=null;ropeRight=null;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;waterYmin=0;waterYmax=1;
 
   // Reset UI
   document.getElementById('player-area').style.display='none';
@@ -1625,94 +1646,112 @@ async function detectBeep(){
     }
     if(rmsArr.length<20)return null;
 
-    // STRATEGY 1: Sharp onset detection in the first 15 seconds
-    // The beep has a very sharp attack — find the biggest volume jump
+    // Search the first 15 seconds for the beep/horn
     const maxSearchTime=Math.min(15,V.duration*0.5);
     const maxIdx=rmsArr.findIndex(function(e){return e.time>maxSearchTime});
     const searchEnd=maxIdx>0?maxIdx:rmsArr.length;
 
-    // Compute volume derivative (smoothed over 3 windows)
-    let bestOnset=-1, bestOnsetScore=0;
-    for(let i=5;i<searchEnd-3;i++){
-      const before=(rmsArr[i-3].rms+rmsArr[i-2].rms+rmsArr[i-1].rms)/3;
-      const after=(rmsArr[i].rms+rmsArr[i+1].rms+rmsArr[i+2].rms)/3;
-      if(before<0.0001)continue; // skip silence
-      const ratio=after/before;
-      const jump=after-before;
-      // Score combines both relative jump and absolute jump
-      const score=ratio*jump;
-      if(score>bestOnsetScore&&ratio>2.0){
-        // Verify it's sustained for at least 40ms (4 windows)
-        let sustained=0;
-        for(let j=i;j<Math.min(i+8,rmsArr.length);j++){
-          if(rmsArr[j].rms>before*1.5)sustained++;
-        }
-        if(sustained>=4){
-          bestOnsetScore=score;
-          bestOnset=i;
-        }
-      }
+    // Log first 2 seconds of RMS for debugging
+    var dbgStr='Beep detect RMS (first 2s): ';
+    for(var di=0;di<rmsArr.length&&rmsArr[di].time<2;di+=5){
+      dbgStr+=rmsArr[di].time.toFixed(2)+':'+rmsArr[di].rms.toFixed(4)+' ';
     }
+    console.log(dbgStr);
 
-    // STRATEGY 2: Loudest sustained burst in first 15 seconds
-    // Use quietest 40% as baseline
-    const earlyRms=rmsArr.slice(0,searchEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
-    const quietBase=earlyRms[Math.floor(earlyRms.length*0.4)];
-    const threshold=Math.max(quietBase*2.5, quietBase+0.005);
-    let burstStart=-1,burstLen=0,bestBurst=-1,bestBurstLen=0;
-    for(let i=0;i<searchEnd;i++){
-      if(rmsArr[i].rms>threshold){
-        if(burstStart<0)burstStart=i;
-        burstLen++;
-      } else {
-        if(burstLen>bestBurstLen&&burstLen>=3){bestBurst=burstStart;bestBurstLen=burstLen}
-        burstStart=-1;burstLen=0;
-      }
-    }
-    if(burstLen>bestBurstLen&&burstLen>=3){bestBurst=burstStart;bestBurstLen=burstLen}
-
-    // Pick the best candidate: prefer sharp onset if found, fall back to loudest burst
+    // STRATEGY 0: Early beep — if the audio starts loud in the first second
+    // (the horn fires almost immediately), look for the first sustained loud region
+    // Compare the first 1s against the next few seconds
     let beepStart=-1;
-    if(bestOnset>=0){
-      beepStart=bestOnset;
-    } else if(bestBurst>=0){
-      beepStart=bestBurst;
+    var earlyEnd=Math.min(searchEnd, Math.floor(1.5/(hopSize/sr)));
+    var laterStart=earlyEnd;
+    var laterEnd=Math.min(searchEnd, Math.floor(8/(hopSize/sr)));
+    if(laterEnd>laterStart+20){
+      // Get the loudness of the "later" period (after potential beep, before swimming)
+      var laterRms=rmsArr.slice(laterStart,laterEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
+      var laterQuiet=laterRms[Math.floor(laterRms.length*0.3)]; // 30th percentile of 1.5-8s
+      // Look for a sustained burst in the first 1.5s that is louder than the quiet later period
+      var earlyThresh=Math.max(laterQuiet*2, 0.005);
+      var eRun=0, eBest=-1, eBestLen=0;
+      for(var ei=0;ei<earlyEnd;ei++){
+        if(rmsArr[ei].rms>earlyThresh){
+          eRun++;
+          if(eRun>=3&&eBest<0) eBest=ei-eRun+1;
+        } else {
+          if(eRun>=3&&eBest>=0&&eRun>eBestLen){eBestLen=eRun}
+          if(eBest<0) eRun=0;
+          else break; // found end of burst
+        }
+      }
+      if(eBest>=0&&eBestLen>=3){
+        beepStart=eBest;
+        console.log('Beep: Strategy 0 (early burst) at',rmsArr[eBest].time.toFixed(3),'s, thresh:',earlyThresh.toFixed(4),'laterQuiet:',laterQuiet.toFixed(4));
+      }
     }
 
-    // STRATEGY 3: If still nothing, try bandpass-filtered signal (400-3500 Hz)
+    // STRATEGY 1: Sharp onset detection — biggest volume jump
     if(beepStart<0){
-      const bp=new Float32Array(raw.length);
-      const dtF=1/sr;
-      // Low-pass at 3500 Hz
-      const aL=dtF/(1/(2*Math.PI*3500)+dtF);
-      bp[0]=raw[0]*aL;
-      for(let i=1;i<raw.length;i++) bp[i]=bp[i-1]+aL*(raw[i]-bp[i-1]);
-      // High-pass at 400 Hz
-      const aH=(1/(2*Math.PI*400))/(1/(2*Math.PI*400)+dtF);
-      let pv=bp[0],po=bp[0];
-      for(let i=1;i<bp.length;i++){const v=aH*(po+bp[i]-pv);pv=bp[i];po=v;bp[i]=v}
-      // RMS on filtered
-      const bpRms=[];
-      for(let start=0;start+winSize<=bp.length;start+=hopSize){
-        let s=0;for(let i=start;i<start+winSize;i++){s+=bp[i]*bp[i]}
-        bpRms.push({time:start/sr,rms:Math.sqrt(s/winSize)});
-      }
-      const bpEnd=Math.min(searchEnd,bpRms.length);
-      for(let i=5;i<bpEnd-3;i++){
-        const bef=(bpRms[i-3].rms+bpRms[i-2].rms+bpRms[i-1].rms)/3;
-        const aft=(bpRms[i].rms+bpRms[i+1].rms+bpRms[i+2].rms)/3;
-        if(bef>0&&aft/bef>2.5){
-          let sus=0;for(let j=i;j<Math.min(i+6,bpRms.length);j++){if(bpRms[j].rms>bef*1.5)sus++}
-          if(sus>=3){beepStart=i;break}
+      var bestOnset=-1, bestOnsetScore=0;
+      for(var i=3;i<searchEnd-3;i++){
+        // Use fewer "before" windows for early detection (min 2)
+        var bCount=Math.min(3,i);
+        var bSum=0;for(var b=i-bCount;b<i;b++) bSum+=rmsArr[b].rms;
+        var before=bSum/bCount;
+        var after=(rmsArr[i].rms+rmsArr[i+1].rms+rmsArr[i+2].rms)/3;
+        if(before<0.00001){
+          // Near-silence before: use absolute threshold instead of ratio
+          if(after>0.01){
+            var sus=0;
+            for(var j=i;j<Math.min(i+6,rmsArr.length);j++){if(rmsArr[j].rms>0.005)sus++}
+            if(sus>=3){bestOnset=i;bestOnsetScore=after;break}
+          }
+          continue;
         }
+        var ratio=after/before;
+        var jump=after-before;
+        var score=ratio*jump;
+        if(score>bestOnsetScore&&ratio>2.0){
+          var sus2=0;
+          for(var j2=i;j2<Math.min(i+8,rmsArr.length);j2++){
+            if(rmsArr[j2].rms>before*1.5)sus2++;
+          }
+          if(sus2>=3){
+            bestOnsetScore=score;
+            bestOnset=i;
+          }
+        }
+      }
+      if(bestOnset>=0){
+        beepStart=bestOnset;
+        console.log('Beep: Strategy 1 (onset) at',rmsArr[bestOnset].time.toFixed(3),'s, score:',bestOnsetScore.toFixed(6));
+      }
+    }
+
+    // STRATEGY 2: Loudest sustained burst in first 15s using quietest 30% as baseline
+    if(beepStart<0){
+      var earlyRms=rmsArr.slice(0,searchEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
+      var quietBase=earlyRms[Math.floor(earlyRms.length*0.3)];
+      var threshold=Math.max(quietBase*2.5, quietBase+0.003);
+      var burstStart2=-1,burstLen2=0,bestBurst=-1,bestBurstLen=0;
+      for(var i2=0;i2<searchEnd;i2++){
+        if(rmsArr[i2].rms>threshold){
+          if(burstStart2<0)burstStart2=i2;
+          burstLen2++;
+        } else {
+          if(burstLen2>bestBurstLen&&burstLen2>=3){bestBurst=burstStart2;bestBurstLen=burstLen2}
+          burstStart2=-1;burstLen2=0;
+        }
+      }
+      if(burstLen2>bestBurstLen&&burstLen2>=3){bestBurst=burstStart2;bestBurstLen=burstLen2}
+      if(bestBurst>=0){
+        beepStart=bestBurst;
+        console.log('Beep: Strategy 2 (burst) at',rmsArr[bestBurst].time.toFixed(3),'s, quietBase:',quietBase.toFixed(4),'thresh:',threshold.toFixed(4));
       }
     }
 
     if(beepStart>=0){
       return rmsArr[beepStart]?rmsArr[beepStart].time:beepStart*hopSize/sr;
     }
-    console.log('Beep detection: no beep found. Quiet baseline:',quietBase.toFixed(4),
-      'threshold:',threshold.toFixed(4),'best onset score:',bestOnsetScore.toFixed(6));
+    console.log('Beep detection: no beep found in first',maxSearchTime.toFixed(0),'s of audio');
     return null;
   }catch(e){
     console.warn('Beep detection failed:',e);
