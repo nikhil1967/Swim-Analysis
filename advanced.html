@@ -376,10 +376,14 @@ let camMode='fixed'; // 'fixed' or 'follow'
 let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
 let beepTime=-1,blockDepartTime=-1,wallTouches=[]; // timing events
 let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
-let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width
-let laneX1=-1,laneX2=-1;  // end-on: two rope taps define the lane exactly
+let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width (legacy fallback)
 let selectingLane=false;
-let laneTapCount=0; // for two-tap lane selection in end-on mode
+let laneTapCount=0; // tap counter for lane selection
+// 4-tap perspective lane: two points on each rope define the lane trapezoid
+// Each point is {x,y} in video-frame-relative coords (0-1)
+let ropeTaps=[]; // collects up to 4 taps: [leftA, leftB, rightA, rightB]
+let ropeLeft=null;  // {x1,y1,x2,y2} — left rope line (sorted by y)
+let ropeRight=null; // {x1,y1,x2,y2} — right rope line (sorted by y)
 let strokeDetectOn=true;
 
 // Course definitions: pool length per lap (wall to wall)
@@ -462,6 +466,21 @@ function getVideoRenderRect(){
   else{const rW=rect.height*vidAR;return{x:(rect.width-rW)/2,y:0,w:rW,h:rect.height}}
 }
 
+// Get lane X boundaries at a given Y (0-1) using the two rope lines
+// Returns {xLeft, xRight} in 0-1 coords, or null if no perspective lane defined
+function getLaneBoundsAtY(yNorm){
+  if(!ropeLeft||!ropeRight) return null;
+  // Interpolate X along left rope line at this Y
+  const lDy=ropeLeft.y2-ropeLeft.y1;
+  const lT=lDy!==0?(yNorm-ropeLeft.y1)/lDy:0.5;
+  const xL=ropeLeft.x1+lT*(ropeLeft.x2-ropeLeft.x1);
+  // Interpolate X along right rope line at this Y
+  const rDy=ropeRight.y2-ropeRight.y1;
+  const rT=rDy!==0?(yNorm-ropeRight.y1)/rDy:0.5;
+  const xR=ropeRight.x1+rT*(ropeRight.x2-ropeRight.x1);
+  return {xLeft:Math.min(xL,xR), xRight:Math.max(xL,xR)};
+}
+
 function startMark(side){
   markingWall=side;
   V.pause();
@@ -487,10 +506,10 @@ function handlePoolMark(e){
 function startLaneSelect(){
   selectingLane=true;
   laneTapCount=0;
-  laneX1=-1;laneX2=-1;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;laneX=-1;
   V.pause();
   if(camMode==='endon'){
-    document.getElementById('lane-btn').textContent='👆 Tap LEFT lane rope...';
+    document.getElementById('lane-btn').textContent='👆 Tap LEFT rope (point 1 of 2)...';
   } else {
     document.getElementById('lane-btn').textContent='👆 Tap on your swimmer...';
   }
@@ -500,30 +519,38 @@ function handleLaneSelect(e){
   if(!selectingLane)return;
   const coords=clickToVideoFrac(e);
   if(camMode==='endon'){
-    // End-on camera: two taps to define lane between ropes
-    const xPct=coords.x;
-    if(laneTapCount===0){
-      laneX1=xPct;
-      laneTapCount=1;
-      document.getElementById('lane-btn').textContent='👆 Now tap RIGHT lane rope...';
-      // Show temporary marker
-      drawLaneOverlay(xPct);
-      return; // wait for second tap
-    } else {
-      laneX2=xPct;
-      // Set lane band from the two rope positions
-      const left=Math.min(laneX1,laneX2);
-      const right=Math.max(laneX1,laneX2);
-      laneX=(left+right)/2;
-      laneW=(right-left)/2;
-      laneY=-1;
-      document.getElementById('lane-val').textContent='Lane '+Math.round(left*100)+'%-'+Math.round(right*100)+'%';
+    // Across-pool camera: 4 taps to define lane trapezoid
+    // Tap any 2 points on left rope, then any 2 points on right rope
+    ropeTaps.push({x:coords.x, y:coords.y});
+    laneTapCount=ropeTaps.length;
+    const prompts=[
+      '👆 Tap LEFT rope (point 2 of 2)...',
+      '👆 Now tap RIGHT rope (point 1 of 2)...',
+      '👆 Tap RIGHT rope (point 2 of 2)...'
+    ];
+    if(laneTapCount<4){
+      document.getElementById('lane-btn').textContent=prompts[laneTapCount-1];
+      drawLaneOverlay(); // show progress markers
+      return; // wait for more taps
     }
+    // All 4 taps collected — build rope lines
+    // Sort each pair by Y so y1 < y2 (top to bottom)
+    const lA=ropeTaps[0],lB=ropeTaps[1];
+    if(lA.y<=lB.y) ropeLeft={x1:lA.x,y1:lA.y,x2:lB.x,y2:lB.y};
+    else ropeLeft={x1:lB.x,y1:lB.y,x2:lA.x,y2:lA.y};
+    const rA=ropeTaps[2],rB=ropeTaps[3];
+    if(rA.y<=rB.y) ropeRight={x1:rA.x,y1:rA.y,x2:rB.x,y2:rB.y};
+    else ropeRight={x1:rB.x,y1:rB.y,x2:rA.x,y2:rA.y};
+    // Also set laneX as midpoint for compatibility with code that checks laneX>=0
+    const midBounds=getLaneBoundsAtY(0.5);
+    if(midBounds){laneX=(midBounds.xLeft+midBounds.xRight)/2;laneW=(midBounds.xRight-midBounds.xLeft)/2}
+    laneY=-1;
+    document.getElementById('lane-val').textContent='Lane (perspective)';
   } else {
     // Side view: single tap horizontal band (Y position)
     const yPct=coords.y;
     laneY=Math.max(0.1,Math.min(0.9,yPct));
-    laneX=-1;
+    laneX=-1;ropeLeft=null;ropeRight=null;
     document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'%';
   }
   selectingLane=false;
@@ -534,13 +561,14 @@ function handleLaneSelect(e){
   drawLaneOverlay();
 }
 function clearLane(){
-  laneY=-1;laneX=-1;laneX1=-1;laneX2=-1;laneTapCount=0;selectingLane=false;
+  laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;
   document.getElementById('lane-val').textContent='All (no filter)';
   document.getElementById('lane-clear-btn').style.display='none';
   document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Lane Ropes':'👆 Tap Swimmer on Video';
   drawLaneOverlay();
 }
-function drawLaneOverlay(firstTapX){
+function drawLaneOverlay(){
   const lo=document.getElementById('lane-overlay');
   const rect=V.getBoundingClientRect();
   const dpr=window.devicePixelRatio||1;
@@ -551,43 +579,92 @@ function drawLaneOverlay(firstTapX){
   lx.clearRect(0,0,rect.width,rect.height);
 
   const elW=rect.width,elH=rect.height;
-  // Get the video content's rendered area within the element
   const vr=getVideoRenderRect();
 
-  // Show first rope tap marker while waiting for second tap
-  if(firstTapX!==undefined&&firstTapX>=0){
-    const x=vr.x+firstTapX*vr.w;
+  // Show tap progress markers during 4-tap selection
+  if(selectingLane&&ropeTaps.length>0&&camMode==='endon'){
     lx.strokeStyle='rgba(0,229,255,0.8)';lx.lineWidth=2;lx.setLineDash([4,3]);
-    lx.beginPath();lx.moveTo(x,vr.y);lx.lineTo(x,vr.y+vr.h);lx.stroke();
+    const labels=['L1 ✓','L2 ✓','R1 ✓','R2 ✓'];
+    const colors=['rgba(0,229,255,0.8)','rgba(0,229,255,0.8)','rgba(255,213,64,0.8)','rgba(255,213,64,0.8)'];
+    ropeTaps.forEach(function(p,i){
+      const px=vr.x+p.x*vr.w, py=vr.y+p.y*vr.h;
+      lx.strokeStyle=colors[i];lx.fillStyle=colors[i];
+      // Draw crosshair
+      lx.beginPath();lx.arc(px,py,6,0,Math.PI*2);lx.stroke();
+      lx.beginPath();lx.moveTo(px-10,py);lx.lineTo(px+10,py);lx.stroke();
+      lx.beginPath();lx.moveTo(px,py-10);lx.lineTo(px,py+10);lx.stroke();
+      lx.font='bold 10px IBM Plex Mono';lx.textAlign='left';
+      lx.fillText(labels[i],px+10,py-4);
+    });
+    // Draw line between first two taps (left rope) if we have both
+    if(ropeTaps.length>=2){
+      const a=ropeTaps[0],b=ropeTaps[1];
+      lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=1.5;
+      // Extend line to full video height
+      const dy=b.y-a.y,dx=b.x-a.x;
+      if(Math.abs(dy)>0.001){
+        const xAtTop=a.x+dx*(0-a.y)/dy, xAtBot=a.x+dx*(1-a.y)/dy;
+        lx.beginPath();lx.moveTo(vr.x+xAtTop*vr.w,vr.y);lx.lineTo(vr.x+xAtBot*vr.w,vr.y+vr.h);lx.stroke();
+      }
+    }
+    // Draw right rope line if we have 3+ taps
+    if(ropeTaps.length>=3){
+      lx.strokeStyle='rgba(255,213,64,0.6)';
+      if(ropeTaps.length>=4){
+        const a=ropeTaps[2],b=ropeTaps[3];
+        const dy=b.y-a.y,dx=b.x-a.x;
+        if(Math.abs(dy)>0.001){
+          const xAtTop=a.x+dx*(0-a.y)/dy, xAtBot=a.x+dx*(1-a.y)/dy;
+          lx.beginPath();lx.moveTo(vr.x+xAtTop*vr.w,vr.y);lx.lineTo(vr.x+xAtBot*vr.w,vr.y+vr.h);lx.stroke();
+        }
+      }
+    }
     lx.setLineDash([]);
-    lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 10px IBM Plex Mono';
-    lx.fillText('LEFT ROPE ✓',x+4,vr.y+16);
     return;
   }
 
-  if(laneX>=0){
-    // End-on mode: vertical band between two ropes (coordinates are video-frame-relative)
+  if(ropeLeft&&ropeRight){
+    // Perspective lane: draw trapezoid between the two rope lines
+    // Sample bounds at top and bottom of video
+    const topB=getLaneBoundsAtY(0), botB=getLaneBoundsAtY(1);
+    if(topB&&botB){
+      const tl=vr.x+topB.xLeft*vr.w, tr=vr.x+topB.xRight*vr.w;
+      const bl=vr.x+botB.xLeft*vr.w, br=vr.x+botB.xRight*vr.w;
+      // Darken outside the trapezoid using clipping
+      lx.save();
+      // Draw full dark overlay
+      lx.fillStyle='rgba(0,0,0,0.5)';
+      lx.beginPath();
+      lx.rect(0,0,elW,elH);
+      // Cut out the trapezoid (counter-clockwise for even-odd)
+      lx.moveTo(tl,vr.y);lx.lineTo(tr,vr.y);lx.lineTo(br,vr.y+vr.h);lx.lineTo(bl,vr.y+vr.h);lx.closePath();
+      lx.fill('evenodd');
+      lx.restore();
+      // Draw trapezoid outline
+      lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
+      lx.beginPath();lx.moveTo(tl,vr.y);lx.lineTo(tr,vr.y);lx.lineTo(br,vr.y+vr.h);lx.lineTo(bl,vr.y+vr.h);lx.closePath();lx.stroke();
+      lx.setLineDash([]);
+      lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
+      lx.fillText('SELECTED LANE',(tl+tr)/2-40,vr.y+14);
+    }
+  } else if(laneX>=0&&!ropeLeft){
+    // Legacy vertical band fallback
     const left=vr.x+Math.max(0,(laneX-laneW))*vr.w;
     const right=vr.x+Math.min(1,(laneX+laneW))*vr.w;
-    // Darken outside the lane band
     lx.fillStyle='rgba(0,0,0,0.5)';
-    lx.fillRect(0,0,left,elH);
-    lx.fillRect(right,0,elW-right,elH);
+    lx.fillRect(0,0,left,elH);lx.fillRect(right,0,elW-right,elH);
     lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
-    lx.strokeRect(left,vr.y,right-left,vr.h);
-    lx.setLineDash([]);
+    lx.strokeRect(left,vr.y,right-left,vr.h);lx.setLineDash([]);
     lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
     lx.fillText('SELECTED LANE',left+6,vr.y+14);
   } else if(laneY>=0){
-    // Side view: horizontal band (coordinates are video-frame-relative)
+    // Side view: horizontal band
     const top=vr.y+Math.max(0,(laneY-laneH))*vr.h;
     const bot=vr.y+Math.min(1,(laneY+laneH))*vr.h;
     lx.fillStyle='rgba(0,0,0,0.5)';
-    lx.fillRect(0,0,elW,top);
-    lx.fillRect(0,bot,elW,elH-bot);
+    lx.fillRect(0,0,elW,top);lx.fillRect(0,bot,elW,elH-bot);
     lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
-    lx.strokeRect(vr.x,top,vr.w,bot-top);
-    lx.setLineDash([]);
+    lx.strokeRect(vr.x,top,vr.w,bot-top);lx.setLineDash([]);
     lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
     lx.fillText('SELECTED LANE',vr.x+6,top+14);
   }
@@ -703,7 +780,7 @@ function setSpd(r){rate=r;V.playbackRate=r;updateHUD();speeds.forEach(function(s
 async function scanVideo(){
   if(scanning||!videoReady)return;
   // Prompt to select swimmer if none selected
-  const noLane=(camMode==='endon')?laneX<0:laneY<0;
+  const noLane=(camMode==='endon')?(laneX<0&&!ropeLeft):laneY<0;
   if(noLane){
     const msg=camMode==='endon'
       ?'No lane selected — analysis will track ALL motion in frame.\n\nFor best results, tap "👆 Tap Swimmer\'s Lane" first to isolate your swimmer\'s lane.\n\nScan anyway?'
@@ -723,10 +800,11 @@ async function scanVideo(){
 
   // Stroke rhythm region: use lane band if selected, otherwise center 50%
   let centerY,centerH,centerX=0,centerW=sw;
-  if(camMode==='endon'&&laneX>=0){
-    // End-on: vertical band for lane, full height for stroke detection
-    centerX=Math.max(0,Math.floor((laneX-laneW)*sw));
-    centerW=Math.min(sw,Math.floor((laneX+laneW)*sw))-centerX;
+  if(camMode==='endon'&&(ropeLeft||laneX>=0)){
+    // End-on: use midpoint of perspective lane (or legacy vertical band) for stroke detection
+    const midB=ropeLeft?getLaneBoundsAtY(0.5):null;
+    if(midB){centerX=Math.max(0,Math.floor(midB.xLeft*sw));centerW=Math.min(sw,Math.floor(midB.xRight*sw))-centerX}
+    else{centerX=Math.max(0,Math.floor((laneX-laneW)*sw));centerW=Math.min(sw,Math.floor((laneX+laneW)*sw))-centerX}
     centerY=0;centerH=sh;
   } else if(laneY>=0){
     centerY=Math.max(0,Math.floor((laneY-laneH)*sh));
@@ -763,15 +841,22 @@ async function scanVideo(){
           let motionWX=0,motionWY=0,motionTotal=0;
           const step=2;
           // Lane filter: restrict to selected region
-          let yStart=0,yEnd=sh,xStart=0,xEnd=sw;
-          if(camMode==='endon'&&laneX>=0){
-            xStart=Math.max(0,Math.floor((laneX-laneW)*sw));
-            xEnd=Math.min(sw,Math.floor((laneX+laneW)*sw));
-          } else if(laneY>=0){
+          const usePerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
+          let yStart=0,yEnd=sh;
+          if(!usePerspective&&laneY>=0){
             yStart=Math.max(0,Math.floor((laneY-laneH)*sh));
             yEnd=Math.min(sh,Math.floor((laneY+laneH)*sh));
           }
           for(let y=yStart;y<yEnd;y+=step){
+            let xStart=0,xEnd=sw;
+            if(usePerspective){
+              // Perspective lane: compute X bounds at this Y row
+              const bounds=getLaneBoundsAtY(y/sh);
+              if(bounds){xStart=Math.max(0,Math.floor(bounds.xLeft*sw));xEnd=Math.min(sw,Math.floor(bounds.xRight*sw))}
+            } else if(camMode==='endon'&&laneX>=0){
+              xStart=Math.max(0,Math.floor((laneX-laneW)*sw));
+              xEnd=Math.min(sw,Math.floor((laneX+laneW)*sw));
+            }
             for(let x=xStart;x<xEnd;x+=step){
               const idx=(y*sw+x)*4;
               const diff=Math.abs(frameData[idx]-prevFrame[idx])
@@ -1425,7 +1510,8 @@ function resetVideo(){
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
   poolStartX=-1;poolFarX=-1;markingWall=null;
-  laneY=-1;laneX=-1;laneX1=-1;laneX2=-1;laneTapCount=0;selectingLane=false;
+  laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;
 
   // Reset UI
   document.getElementById('player-area').style.display='none';
