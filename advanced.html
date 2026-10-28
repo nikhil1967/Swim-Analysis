@@ -565,8 +565,11 @@ document.getElementById('file-input').addEventListener('change',function(e){
 });
 
 V.addEventListener('loadedmetadata',function(){showSt(V.videoWidth+'×'+V.videoHeight+' · '+V.duration.toFixed(1)+'s','loading');resizeCanvas()});
-V.addEventListener('loadeddata',function(){videoReady=true;updateHUD();showSt('Ready — enter distance & laps, then Scan','ready')});
-V.addEventListener('canplay',function(){videoReady=true;resizeCanvas();showSt('Ready','ready')});
+V.addEventListener('loadeddata',function(){videoReady=true;updateHUD();showSt('Ready — 1) Select swimmer  2) Set event  3) Scan','ready')});
+V.addEventListener('canplay',function(){videoReady=true;resizeCanvas();showSt('Ready','ready');
+  // Pulse the lane select button to guide workflow
+  const lb=document.getElementById('lane-btn');lb.style.animation='pulse 1.5s 3';
+});
 V.addEventListener('error',function(){showSt('Error: '+(V.error?'Code '+V.error.code:'Unknown'),'error')});
 V.addEventListener('play',function(){playing=true;document.getElementById('play-btn').className='btn btn-pause';document.getElementById('play-btn').innerHTML='⏸ PAUSE';updateMode();if(V.requestVideoFrameCallback)V.requestVideoFrameCallback(onVF)});
 V.addEventListener('pause',function(){playing=false;document.getElementById('play-btn').className='btn btn-play';document.getElementById('play-btn').innerHTML='▶ PLAY';updateMode()});
@@ -610,6 +613,11 @@ function setSpd(r){rate=r;V.playbackRate=r;updateHUD();speeds.forEach(function(s
 // ===== SCANNER: FIXED camera (track swimmer) or FOLLOW camera (track background) =====
 async function scanVideo(){
   if(scanning||!videoReady)return;
+  // Prompt to select swimmer if none selected
+  if(laneY<0){
+    const go=confirm('No swimmer selected — analysis will track ALL motion in frame.\n\nFor best results, tap "👆 Tap Swimmer on Video" first to isolate your swimmer.\n\nScan anyway?');
+    if(!go)return;
+  }
   scanning=true;scanned=false;flowData=[];motionData=[];
 
   const btn=document.getElementById('scan-btn');
