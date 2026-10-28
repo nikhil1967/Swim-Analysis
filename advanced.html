@@ -1255,7 +1255,11 @@ else document.getElementById('sw-w').classList.add('on');
 if(tool==='erase')setTool('draw')}
 
 function getPos(e){const r=canvas.getBoundingClientRect();if(e.touches)return{x:e.touches[0].clientX-r.left,y:e.touches[0].clientY-r.top};return{x:e.clientX-r.left,y:e.clientY-r.top}}
-function startD(e){if(playing||scanning)return;e.preventDefault();isD=true;const p=getPos(e);cStroke=[{x:p.x,y:p.y,c:tool==='erase'?'e':dc,w:tool==='erase'?lw*4:lw,t:tool}]}
+function startD(e){if(playing||scanning)return;
+  // Forward clicks to lane/wall selection when active (draw canvas intercepts them)
+  if(selectingLane){e.preventDefault();handleLaneSelect(e);return}
+  if(markingWall){e.preventDefault();handlePoolMark(e);return}
+  e.preventDefault();isD=true;const p=getPos(e);cStroke=[{x:p.x,y:p.y,c:tool==='erase'?'e':dc,w:tool==='erase'?lw*4:lw,t:tool}]}
 function moveD(e){if(!isD||playing)return;e.preventDefault();const p=getPos(e),prev=cStroke[cStroke.length-1];
 if(tool==='erase'){ctx.globalCompositeOperation='destination-out';ctx.strokeStyle='rgba(0,0,0,1)';ctx.lineWidth=lw*4}
 else{ctx.globalCompositeOperation='source-over';ctx.strokeStyle=dc;ctx.lineWidth=lw}
@@ -1345,51 +1349,71 @@ async function detectBeep(){
     const sr=audioBuf.sampleRate;
     const ch=audioBuf.getChannelData(0);
 
-    // Analyze in short windows for high-frequency energy spike
-    // Starting beep is typically a 1-4kHz tone, 0.5-2 seconds long
-    const winSize=Math.floor(sr*0.05); // 50ms windows
-    const hopSize=Math.floor(sr*0.025); // 25ms hop
-    const energies=[];
+    // RMS energy in short windows — the starting beep is one of the loudest
+    // sounds in a swim meet recording, so detect via volume spike
+    const winSize=Math.floor(sr*0.03); // 30ms windows
+    const hopSize=Math.floor(sr*0.015); // 15ms hop
+    const rmsArr=[];
 
     for(let start=0;start+winSize<=ch.length;start+=hopSize){
-      // High-pass energy: approximate by computing differences (emphasizes high freq)
-      let hfEnergy=0,totalEnergy=0;
-      for(let i=start+1;i<start+winSize;i++){
-        const diff=ch[i]-ch[i-1]; // simple high-pass
-        hfEnergy+=diff*diff;
-        totalEnergy+=ch[i]*ch[i];
-      }
-      // Ratio of high-freq to total gives us tonal content
-      const ratio=totalEnergy>0?hfEnergy/totalEnergy:0;
-      energies.push({time:start/sr,hfEnergy:hfEnergy/winSize,total:totalEnergy/winSize,ratio:ratio});
+      let sumSq=0;
+      for(let i=start;i<start+winSize;i++){sumSq+=ch[i]*ch[i]}
+      rmsArr.push({time:start/sr,rms:Math.sqrt(sumSq/winSize)});
     }
 
-    if(energies.length<10)return null;
+    if(rmsArr.length<20)return null;
 
-    // Find the first significant high-frequency energy spike
-    // The beep should be louder than background and have high HF ratio
-    const sorted=energies.map(function(e){return e.hfEnergy}).sort(function(a,b){return a-b});
-    const medianHF=sorted[Math.floor(sorted.length*0.5)];
-    const p90HF=sorted[Math.floor(sorted.length*0.9)];
-    const threshold=Math.max(medianHF*5,p90HF*0.5);
+    // Compute running baseline: median of first 60% of windows (before the beep in most clips)
+    // Also compute overall statistics for adaptive threshold
+    const allRms=rmsArr.map(function(e){return e.rms}).slice();
+    const sortedRms=allRms.slice().sort(function(a,b){return a-b});
+    const median=sortedRms[Math.floor(sortedRms.length*0.5)];
+    const p75=sortedRms[Math.floor(sortedRms.length*0.75)];
+    const p95=sortedRms[Math.floor(sortedRms.length*0.95)];
 
-    // Look for sustained spike (beep lasts at least 100ms = 4 consecutive windows)
+    // Adaptive threshold: the beep must be significantly louder than background
+    // Use the bigger of: 3× median, or halfway between p75 and p95
+    // This handles both quiet recordings (crowd noise low) and noisy ones
+    const threshold=Math.max(median*3, (p75+p95)/2, median+0.005);
+
+    // Look for sustained spike: beep lasts at least ~150ms (10 consecutive windows above threshold)
+    // But also accept shorter bursts of ~90ms (6 windows) if very loud (>5× median)
     let beepStart=-1;
     let runLen=0;
-    for(let i=0;i<energies.length;i++){
-      if(energies[i].hfEnergy>threshold&&energies[i].total>medianHF*2){
+    const minRun=6;
+    const preferRun=10;
+    for(let i=0;i<rmsArr.length;i++){
+      if(rmsArr[i].rms>threshold){
         runLen++;
-        if(runLen>=4&&beepStart<0){
-          beepStart=i-3; // start of the run
+        if(beepStart<0&&runLen>=minRun){
+          // Check if this is genuinely loud (not just ambient noise crossing threshold)
+          const runStart=i-runLen+1;
+          const avgRun=rmsArr.slice(runStart,i+1).reduce(function(s,e){return s+e.rms},0)/runLen;
+          if(avgRun>median*2.5||runLen>=preferRun){
+            beepStart=runStart;
+          }
         }
       } else {
-        if(beepStart>=0)break; // found it
+        if(beepStart>=0)break; // found it, stop at end of beep
         runLen=0;
       }
     }
 
+    // Fallback: if sustained detection failed, look for any sharp onset
+    // (volume jumps by 4× within 5 windows)
+    if(beepStart<0){
+      for(let i=5;i<rmsArr.length-5;i++){
+        const before=rmsArr.slice(Math.max(0,i-5),i).reduce(function(s,e){return s+e.rms},0)/5;
+        const after=rmsArr.slice(i,i+5).reduce(function(s,e){return s+e.rms},0)/5;
+        if(before>0&&after/before>4&&after>median*2){
+          beepStart=i;
+          break;
+        }
+      }
+    }
+
     if(beepStart>=0){
-      return energies[beepStart].time;
+      return rmsArr[beepStart].time;
     }
     return null;
   }catch(e){
