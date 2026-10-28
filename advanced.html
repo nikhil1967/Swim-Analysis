@@ -1329,10 +1329,44 @@ function drawGraph(){
   gx.fillStyle='#76ff03';gx.font='bold 9px IBM Plex Mono';gx.textAlign='center';
   gx.fillText(flowData[peakI].speed.toFixed(2),px,py-10);
 
+  // Event markers (beep, block departure, wall touches/turns)
+  (function(){
+    function drawEventMarker(time,color,label,dashPattern){
+      if(time<0)return;
+      var mx;
+      if(xAxis==='time'){
+        mx=svx(time);
+      } else {
+        // For distance axis, find closest flowData point to this time
+        var mIdx=0;
+        for(var i=0;i<flowData.length;i++){if(flowData[i].time>=time){mIdx=i;break}mIdx=i}
+        mx=svx(flowData[mIdx].distance);
+      }
+      if(mx<pad.l||mx>W-pad.r)return;
+      gx.save();
+      gx.strokeStyle=color;gx.lineWidth=1.5;
+      if(dashPattern)gx.setLineDash(dashPattern);
+      gx.globalAlpha=0.8;
+      gx.beginPath();gx.moveTo(mx,pad.t);gx.lineTo(mx,pad.t+gH);gx.stroke();
+      gx.setLineDash([]);
+      gx.globalAlpha=0.9;
+      gx.fillStyle=color;gx.font='bold 8px IBM Plex Mono';gx.textAlign='center';
+      gx.fillText(label,mx,pad.t-3);
+      gx.restore();
+    }
+    if(beepTime>=0) drawEventMarker(beepTime,'#ffd600','BEEP',[4,3]);
+    if(blockDepartTime>=0) drawEventMarker(blockDepartTime,'#ff9100','GO',[]);
+    wallTouches.forEach(function(w,i){
+      var lbl=w.wallLabel||(w.direction==='reversal'?'TURN':'WALL');
+      if(wallTouches.length>1) lbl+=' '+(i+1);
+      drawEventMarker(w.time,'#e040fb',lbl,[6,3]);
+    });
+  })();
+
   // Cursor
   const ct=V.currentTime;
-  let ci=0;
-  for(let i=0;i<flowData.length;i++){if(flowData[i].time>=ct){ci=i;break}ci=i}
+  var ci=0;
+  for(var i=0;i<flowData.length;i++){if(flowData[i].time>=ct){ci=i;break}ci=i}
   const cx=svx(xVals[ci]);
   if(cx>=pad.l&&cx<=W-pad.r){
     gx.strokeStyle='#ff3333';gx.lineWidth=2;
@@ -1423,9 +1457,31 @@ function drawMotionGraph(){
   mx.fillStyle=detectedStroke==='breast'?'#ffb74d':'#64b5f6';mx.font='bold 9px IBM Plex Mono';
   mx.fillText('Motion',0,0);mx.restore();
 
+  // Event markers on motion graph
+  (function(){
+    function drawMM(time,color,label,dash){
+      if(time<0)return;
+      var ex=svx(time);
+      if(ex<pad.l||ex>W-pad.r)return;
+      mx.save();mx.strokeStyle=color;mx.lineWidth=1;mx.globalAlpha=0.7;
+      if(dash)mx.setLineDash(dash);
+      mx.beginPath();mx.moveTo(ex,pad.t);mx.lineTo(ex,pad.t+gH);mx.stroke();
+      mx.setLineDash([]);mx.globalAlpha=0.85;
+      mx.fillStyle=color;mx.font='bold 7px IBM Plex Mono';mx.textAlign='center';
+      mx.fillText(label,ex,pad.t-1);mx.restore();
+    }
+    if(beepTime>=0) drawMM(beepTime,'#ffd600','BEEP',[3,2]);
+    if(blockDepartTime>=0) drawMM(blockDepartTime,'#ff9100','GO',null);
+    wallTouches.forEach(function(w,i){
+      var lbl=w.wallLabel||(w.direction==='reversal'?'T':'W');
+      if(wallTouches.length>1) lbl+=(i+1);
+      drawMM(w.time,'#e040fb',lbl,[4,2]);
+    });
+  })();
+
   // Cursor
   const ct=V.currentTime;
-  let ci=0;for(let i=0;i<motionData.length;i++){if(motionData[i].time>=ct){ci=i;break}ci=i}
+  var ci=0;for(var i=0;i<motionData.length;i++){if(motionData[i].time>=ct){ci=i;break}ci=i}
   const cx=svx(motionData[ci].time);
   if(cx>=pad.l&&cx<=W-pad.r){
     mx.strokeStyle='#ff3333';mx.lineWidth=1.5;
@@ -1558,95 +1614,105 @@ async function detectBeep(){
     const sr=audioBuf.sampleRate;
     const raw=audioBuf.getChannelData(0);
 
-    // Bandpass filter 800-2000 Hz to isolate the swim meet beep tone
-    // from broadband crowd noise. Two-pass IIR (low-pass then high-pass).
-    const ch=new Float32Array(raw.length);
-    // Low-pass at 2200 Hz (let a bit above 2kHz through)
-    const rcLP=1/(2*Math.PI*2200);const dtLP=1/sr;const aLP=dtLP/(rcLP+dtLP);
-    ch[0]=raw[0]*aLP;
-    for(let i=1;i<raw.length;i++) ch[i]=ch[i-1]+aLP*(raw[i]-ch[i-1]);
-    // High-pass at 700 Hz (block below beep range)
-    const rcHP=1/(2*Math.PI*700);const aHP=rcHP/(rcHP+dtLP);
-    let prev=ch[0],prevOut=ch[0];
-    for(let i=1;i<ch.length;i++){const v=aHP*(prevOut+ch[i]-prev);prev=ch[i];prevOut=v;ch[i]=v}
-
-    // RMS energy in short windows on the filtered signal
-    const winSize=Math.floor(sr*0.03); // 30ms windows
-    const hopSize=Math.floor(sr*0.015); // 15ms hop
+    // RMS energy in short windows on the raw signal
+    const winSize=Math.floor(sr*0.02); // 20ms windows
+    const hopSize=Math.floor(sr*0.01); // 10ms hop
     const rmsArr=[];
-
-    for(let start=0;start+winSize<=ch.length;start+=hopSize){
+    for(let start=0;start+winSize<=raw.length;start+=hopSize){
       let sumSq=0;
-      for(let i=start;i<start+winSize;i++){sumSq+=ch[i]*ch[i]}
+      for(let i=start;i<start+winSize;i++){sumSq+=raw[i]*raw[i]}
       rmsArr.push({time:start/sr,rms:Math.sqrt(sumSq/winSize)});
     }
-
     if(rmsArr.length<20)return null;
 
-    // Use the QUIETEST 50% of windows as baseline (handles beep at start of recording)
-    const allRms=rmsArr.map(function(e){return e.rms}).slice();
-    const sortedRms=allRms.slice().sort(function(a,b){return a-b});
-    const quietHalf=sortedRms.slice(0,Math.floor(sortedRms.length*0.5));
-    const median=quietHalf[Math.floor(quietHalf.length*0.5)];
-    const p75=sortedRms[Math.floor(sortedRms.length*0.75)];
-    const p90=sortedRms[Math.floor(sortedRms.length*0.90)];
+    // STRATEGY 1: Sharp onset detection in the first 15 seconds
+    // The beep has a very sharp attack — find the biggest volume jump
+    const maxSearchTime=Math.min(15,V.duration*0.5);
+    const maxIdx=rmsArr.findIndex(function(e){return e.time>maxSearchTime});
+    const searchEnd=maxIdx>0?maxIdx:rmsArr.length;
 
-    // Adaptive threshold: with bandpass, beep should be clearly above background
-    const threshold=Math.max(median*2.5, (median+p90)/2, median+0.003);
+    // Compute volume derivative (smoothed over 3 windows)
+    let bestOnset=-1, bestOnsetScore=0;
+    for(let i=5;i<searchEnd-3;i++){
+      const before=(rmsArr[i-3].rms+rmsArr[i-2].rms+rmsArr[i-1].rms)/3;
+      const after=(rmsArr[i].rms+rmsArr[i+1].rms+rmsArr[i+2].rms)/3;
+      if(before<0.0001)continue; // skip silence
+      const ratio=after/before;
+      const jump=after-before;
+      // Score combines both relative jump and absolute jump
+      const score=ratio*jump;
+      if(score>bestOnsetScore&&ratio>2.0){
+        // Verify it's sustained for at least 40ms (4 windows)
+        let sustained=0;
+        for(let j=i;j<Math.min(i+8,rmsArr.length);j++){
+          if(rmsArr[j].rms>before*1.5)sustained++;
+        }
+        if(sustained>=4){
+          bestOnsetScore=score;
+          bestOnset=i;
+        }
+      }
+    }
 
-    // Look for sustained spike: beep lasts ~150-300ms
-    let beepStart=-1;
-    let runLen=0;
-    const minRun=4; // ~60ms minimum (4 windows × 15ms hop)
-    for(let i=0;i<rmsArr.length;i++){
+    // STRATEGY 2: Loudest sustained burst in first 15 seconds
+    // Use quietest 40% as baseline
+    const earlyRms=rmsArr.slice(0,searchEnd).map(function(e){return e.rms}).sort(function(a,b){return a-b});
+    const quietBase=earlyRms[Math.floor(earlyRms.length*0.4)];
+    const threshold=Math.max(quietBase*2.5, quietBase+0.005);
+    let burstStart=-1,burstLen=0,bestBurst=-1,bestBurstLen=0;
+    for(let i=0;i<searchEnd;i++){
       if(rmsArr[i].rms>threshold){
-        runLen++;
-        if(beepStart<0&&runLen>=minRun){
-          const runStart=i-runLen+1;
-          const avgRun=rmsArr.slice(runStart,i+1).reduce(function(s,e){return s+e.rms},0)/runLen;
-          if(avgRun>median*2){
-            beepStart=runStart;
-          }
-        }
+        if(burstStart<0)burstStart=i;
+        burstLen++;
       } else {
-        if(beepStart>=0)break;
-        runLen=0;
+        if(burstLen>bestBurstLen&&burstLen>=3){bestBurst=burstStart;bestBurstLen=burstLen}
+        burstStart=-1;burstLen=0;
       }
     }
+    if(burstLen>bestBurstLen&&burstLen>=3){bestBurst=burstStart;bestBurstLen=burstLen}
 
-    // Fallback: sharp onset in the filtered signal (3× volume jump)
+    // Pick the best candidate: prefer sharp onset if found, fall back to loudest burst
+    let beepStart=-1;
+    if(bestOnset>=0){
+      beepStart=bestOnset;
+    } else if(bestBurst>=0){
+      beepStart=bestBurst;
+    }
+
+    // STRATEGY 3: If still nothing, try bandpass-filtered signal (400-3500 Hz)
     if(beepStart<0){
-      for(let i=4;i<rmsArr.length-4;i++){
-        const before=rmsArr.slice(Math.max(0,i-4),i).reduce(function(s,e){return s+e.rms},0)/4;
-        const after=rmsArr.slice(i,i+4).reduce(function(s,e){return s+e.rms},0)/4;
-        if(before>0&&after/before>3&&after>median*1.5){
-          beepStart=i;
-          break;
+      const bp=new Float32Array(raw.length);
+      const dtF=1/sr;
+      // Low-pass at 3500 Hz
+      const aL=dtF/(1/(2*Math.PI*3500)+dtF);
+      bp[0]=raw[0]*aL;
+      for(let i=1;i<raw.length;i++) bp[i]=bp[i-1]+aL*(raw[i]-bp[i-1]);
+      // High-pass at 400 Hz
+      const aH=(1/(2*Math.PI*400))/(1/(2*Math.PI*400)+dtF);
+      let pv=bp[0],po=bp[0];
+      for(let i=1;i<bp.length;i++){const v=aH*(po+bp[i]-pv);pv=bp[i];po=v;bp[i]=v}
+      // RMS on filtered
+      const bpRms=[];
+      for(let start=0;start+winSize<=bp.length;start+=hopSize){
+        let s=0;for(let i=start;i<start+winSize;i++){s+=bp[i]*bp[i]}
+        bpRms.push({time:start/sr,rms:Math.sqrt(s/winSize)});
+      }
+      const bpEnd=Math.min(searchEnd,bpRms.length);
+      for(let i=5;i<bpEnd-3;i++){
+        const bef=(bpRms[i-3].rms+bpRms[i-2].rms+bpRms[i-1].rms)/3;
+        const aft=(bpRms[i].rms+bpRms[i+1].rms+bpRms[i+2].rms)/3;
+        if(bef>0&&aft/bef>2.5){
+          let sus=0;for(let j=i;j<Math.min(i+6,bpRms.length);j++){if(bpRms[j].rms>bef*1.5)sus++}
+          if(sus>=3){beepStart=i;break}
         }
-      }
-    }
-
-    // Second fallback: try the unfiltered signal for very different beep tones
-    if(beepStart<0){
-      const rawRms=[];
-      for(let start=0;start+winSize<=raw.length;start+=hopSize){
-        let sumSq=0;
-        for(let i=start;i<start+winSize;i++){sumSq+=raw[i]*raw[i]}
-        rawRms.push({time:start/sr,rms:Math.sqrt(sumSq/winSize)});
-      }
-      const rawSorted=rawRms.map(function(e){return e.rms}).sort(function(a,b){return a-b});
-      const rawMed=rawSorted[Math.floor(rawSorted.length*0.4)];
-      const rawThresh=Math.max(rawMed*3.5, rawMed+0.008);
-      let rr=0;
-      for(let i=0;i<rawRms.length;i++){
-        if(rawRms[i].rms>rawThresh){rr++;if(rr>=6&&beepStart<0)beepStart=i-rr+1}
-        else{if(beepStart>=0)break;rr=0}
       }
     }
 
     if(beepStart>=0){
       return rmsArr[beepStart]?rmsArr[beepStart].time:beepStart*hopSize/sr;
     }
+    console.log('Beep detection: no beep found. Quiet baseline:',quietBase.toFixed(4),
+      'threshold:',threshold.toFixed(4),'best onset score:',bestOnsetScore.toFixed(6));
     return null;
   }catch(e){
     console.warn('Beep detection failed:',e);
@@ -1867,7 +1933,7 @@ function calibrateSpeedFromWalls(flowData,wallTouches,beepT,blockT,dt){
   const startTime=blockT>0?blockT:(beepT>0?beepT:(flowData.length>0?flowData[0].time:0));
 
   const times=[startTime];
-  wallTouches.forEach(function(w){times.push(w.time)});
+  wallTouches.forEach(function(w){if(w.time>startTime+0.5)times.push(w.time)});
   // Add end of video if we don't have enough wall touches
   if(flowData.length>0)times.push(flowData[flowData.length-1].time);
 
@@ -1963,20 +2029,22 @@ function showTimingEvents(){
       row.appendChild(el);
     });
 
-    // Lap splits
+    // Lap splits — only include wall touches AFTER the race start
     const startTime=blockDepartTime>0?blockDepartTime:(beepTime>0?beepTime:0);
-    const splitTimes=[startTime].concat(wallTouches.map(function(w){return w.time}));
+    const validWalls=wallTouches.filter(function(w){return w.time>startTime+0.5});
+    const splitTimes=[startTime].concat(validWalls.map(function(w){return w.time}));
     if(splitTimes.length>1){
       document.getElementById('lap-splits-box').style.display='block';
       const srow=document.getElementById('lap-splits-row');
       srow.innerHTML='';
       for(let i=1;i<splitTimes.length;i++){
         const lapTime=splitTimes[i]-splitTimes[i-1];
+        if(lapTime<=0)continue; // skip invalid
         const lapSpeed=(getLapLen()/lapTime).toFixed(2);
         const el=document.createElement('div');
         el.className='wt-item';
         el.style.background='rgba(118,255,3,.05)';el.style.color='#76ff03';
-        el.innerHTML='Lap '+i+': '+lapTime.toFixed(2)+'s <small>'+lapSpeed+' '+speedUnit+'</small>';
+        el.innerHTML='Lap '+i+': '+lapTime.toFixed(2)+'s <small>'+(isFinite(lapSpeed)?lapSpeed:'--')+' '+speedUnit+'</small>';
         srow.appendChild(el);
       }
     }
