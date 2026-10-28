@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Swim Coach Annotator</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0c;color:#b0c0d0;font-family:'IBM Plex Mono','Menlo',monospace;min-height:100vh;-webkit-text-size-adjust:100%;touch-action:manipulation}
+.wrap{max-width:1000px;margin:0 auto;padding:12px 12px 80px}
+button{font-family:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+input[type=number]{font-family:inherit;-webkit-appearance:none;-moz-appearance:textfield}
+
+#upload-zone{display:flex;flex-direction:column;align-items:center;justify-content:center;height:340px;border-radius:12px;cursor:pointer;border:1px dashed rgba(0,229,255,.2);background:rgba(0,229,255,.015)}
+#player-area{display:none}
+
+.setup-bar{background:rgba(0,229,255,.03);border-radius:12px;padding:12px 14px;border:1px solid rgba(0,229,255,.08);margin-bottom:8px}
+.setup-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.setup-row+.setup-row{margin-top:8px}
+.setup-label{font-size:10px;color:#00e5ff;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;min-width:65px;flex-shrink:0}
+.setup-input{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 10px;color:#e0e8f0;font-family:inherit;font-size:14px;font-weight:700;width:65px;text-align:center;outline:none}
+.setup-input:focus{border-color:#00e5ff}
+select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.06) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a7a8a'/%3E%3C/svg%3E") no-repeat right 8px center;padding-right:22px;cursor:pointer}
+.setup-unit{font-size:11px;color:#5a7a8a;flex-shrink:0}
+.u-toggle{display:flex;gap:2px;background:rgba(255,255,255,.03);border-radius:6px;padding:2px}
+.u-toggle button{padding:5px 10px;border:none;border-radius:4px;font-family:inherit;font-size:10px;font-weight:700;cursor:pointer;color:#5a7a8a;background:transparent}
+.u-toggle button.on{background:rgba(0,229,255,.15);color:#00e5ff}
+.setup-summary{font-size:10px;color:#3a5a6a;margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.04)}
+
+.canvas-wrap{position:relative;border-radius:10px 10px 0 0;overflow:hidden;border:1px solid rgba(255,255,255,.08);border-bottom:none;background:#000;touch-action:none}
+.canvas-wrap video{width:100%;display:block;max-height:460px;object-fit:contain;background:#000}
+#draw-canvas{position:absolute;top:0;left:0;width:100%;height:100%;touch-action:none}
+.canvas-wrap.drawing #draw-canvas{z-index:10;cursor:crosshair}
+.canvas-wrap:not(.drawing) #draw-canvas{pointer-events:none;z-index:1}
+
+.info-bar{display:flex;justify-content:space-between;align-items:center;padding:5px 12px;background:rgba(255,255,255,.025);border-left:1px solid rgba(255,255,255,.08);border-right:1px solid rgba(255,255,255,.08)}
+#time-display{font-size:17px;font-weight:800;color:#00e5ff;font-variant-numeric:tabular-nums}
+.fr{font-size:11px;color:#5a7a8a;margin-left:8px}
+.fr b{color:#ffd740}
+.mode-d{font-size:10px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:12px}
+.mp{background:rgba(0,229,255,.1);color:#00e5ff}
+.md{background:rgba(255,215,64,.1);color:#ffd740}
+.me{background:rgba(255,82,82,.1);color:#ff5252}
+
+/* Stroke badge */
+.stroke-badge{display:inline-block;font-size:10px;font-weight:800;letter-spacing:1px;padding:3px 10px;border-radius:12px;margin-left:6px}
+.stroke-breast{background:rgba(255,152,0,.15);color:#ffb74d}
+.stroke-free{background:rgba(33,150,243,.15);color:#64b5f6}
+.stroke-back{background:rgba(171,71,188,.15);color:#ce93d8}
+.stroke-unknown{background:rgba(255,255,255,.05);color:#5a7a8a}
+
+/* Graph */
+.graph-box{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.08);border-top:none;border-radius:0 0 10px 10px;margin-bottom:8px;overflow:hidden}
+.graph-hdr{display:flex;justify-content:space-between;align-items:center;padding:6px 12px 2px;flex-wrap:wrap;gap:4px}
+.graph-t{font-size:9px;color:#3a4a5a;letter-spacing:2px;text-transform:uppercase;font-weight:700}
+.graph-ctrls{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.scan-btn{background:linear-gradient(135deg,#00e5ff,#0077b6);color:#0a0a0c;border:none;border-radius:6px;padding:6px 14px;font-weight:700;font-size:11px;font-family:inherit;min-height:32px}
+.scan-btn:disabled{opacity:.4}
+.scan-btn.scanning{background:linear-gradient(135deg,#ffd740,#ff9100);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+#graph-canvas{width:100%;height:180px;display:block;cursor:pointer;background:rgba(0,0,0,.3)}
+.graph-info{display:flex;justify-content:space-between;padding:3px 12px 5px;font-size:9px;color:#3a4a5a;flex-wrap:wrap;gap:4px}
+#scan-progress{height:3px;background:rgba(0,229,255,.3);width:0%;transition:width .1s}
+
+/* Motion graph */
+.motion-box{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.08);border-radius:10px;margin-bottom:8px;overflow:hidden}
+.motion-box .graph-hdr{padding:6px 12px 2px}
+#motion-canvas{width:100%;height:100px;display:block;cursor:pointer}
+
+#status-bar{padding:5px 12px;border-radius:6px;font-size:11px;display:none;margin-bottom:6px}
+#status-bar.loading{display:block;background:rgba(255,215,64,.06);color:#ffd740}
+#status-bar.error{display:block;background:rgba(255,82,82,.06);color:#ff5252}
+#status-bar.ready{display:block;background:rgba(118,255,3,.04);color:#76ff03}
+
+.btn{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:11px 12px;color:#7a8a9a;font-size:13px;font-weight:600;min-height:46px;display:flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap}
+.btn:active{background:rgba(255,255,255,.08)}
+.btn-play{background:linear-gradient(135deg,#00e5ff,#0077b6);color:#0a0a0c;font-weight:800;border:none}
+.btn-pause{background:rgba(255,82,82,.12);border:1px solid rgba(255,82,82,.3);color:#ff5252;font-weight:800}
+.btn-sm{padding:7px 9px;min-height:36px;font-size:11px;border-radius:8px}
+.btn-on{background:rgba(255,215,64,.12)!important;border-color:#ffd740!important;color:#ffd740!important}
+
+.frame-row{display:grid;grid-template-columns:1fr 1fr 1.5fr 1fr 1fr;gap:4px;margin-bottom:5px}
+.frame10-row{display:grid;grid-template-columns:1fr 1.5fr 1fr;gap:4px;margin-bottom:6px}
+.speed-row{display:flex;gap:3px;margin-bottom:8px;overflow-x:auto;align-items:center}
+.sp-label{font-size:9px;color:#3a4a5a;letter-spacing:1.5px;flex-shrink:0;padding-right:3px}
+
+.draw-bar{background:rgba(255,255,255,.025);border-radius:12px;padding:10px;border:1px solid rgba(255,255,255,.05);margin-bottom:6px}
+.draw-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.dl{font-size:9px;color:#3a4a5a;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0}
+.swatch{width:36px;height:36px;border-radius:50%;border:3px solid transparent;cursor:pointer;flex-shrink:0}
+.swatch.on{border-color:rgba(255,255,255,.6);transform:scale(1.12)}
+.tool-btn{padding:8px 14px;min-height:40px;border-radius:8px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:5px}
+.w-slider{-webkit-appearance:none;width:90px;height:5px;background:rgba(255,255,255,.1);border-radius:3px;outline:none;flex-shrink:0}
+.w-slider::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#fff;border:2px solid #333}
+.save-btn{background:linear-gradient(135deg,#76ff03,#00c853);color:#0a0a0c;border:none;border-radius:10px;padding:10px 18px;font-weight:800;font-size:12px;font-family:inherit;min-height:44px;flex-shrink:0}
+.divider{width:1px;height:26px;background:rgba(255,255,255,.08);margin:0 3px;flex-shrink:0}
+.tip{padding:8px 12px;border-radius:8px;background:rgba(255,255,255,.015);border:1px solid rgba(255,255,255,.03);font-size:10px;color:#2a3a4a;line-height:1.7}
+
+/* Timing events */
+.timing-box{background:rgba(255,215,64,.03);border:1px solid rgba(255,215,64,.08);border-radius:10px;padding:12px;margin-bottom:8px;display:none}
+.timing-box h3{font-size:11px;color:#ffd740;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
+.timing-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.timing-item{background:rgba(255,255,255,.03);border-radius:8px;padding:8px 10px}
+.timing-item .tl{font-size:9px;color:#5a7a6a;letter-spacing:1px;text-transform:uppercase}
+.timing-item .tv{font-size:15px;font-weight:800;color:#ffd740;margin-top:2px;font-variant-numeric:tabular-nums}
+.timing-item .tv small{font-size:10px;font-weight:600;color:#5a7a8a}
+.wall-times{margin-top:6px}
+.wall-times .wt-label{font-size:9px;color:#3a5a6a;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
+.wall-times .wt-row{display:flex;gap:6px;flex-wrap:wrap}
+.wall-times .wt-item{background:rgba(0,229,255,.05);border-radius:6px;padding:5px 8px;font-size:12px;font-weight:700;color:#00e5ff;cursor:pointer}
+.wall-times .wt-item:hover{background:rgba(0,229,255,.12)}
+.wall-times .wt-item small{font-size:9px;color:#5a7a8a;font-weight:600}
+
+/* Analysis summary */
+.analysis-box{background:rgba(0,229,255,.03);border:1px solid rgba(0,229,255,.08);border-radius:10px;padding:12px;margin-bottom:8px;display:none}
+.analysis-box h3{font-size:11px;color:#00e5ff;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
+.analysis-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.analysis-item{background:rgba(255,255,255,.03);border-radius:8px;padding:8px 10px}
+.analysis-item .al{font-size:9px;color:#3a5a6a;letter-spacing:1px;text-transform:uppercase}
+.analysis-item .av{font-size:16px;font-weight:800;color:#e0e8f0;margin-top:2px}
+.analysis-item .av small{font-size:10px;font-weight:600;color:#5a7a8a}
+
+/* New video button */
+.new-video-btn{background:rgba(255,82,82,.08);border:1px solid rgba(255,82,82,.2);border-radius:8px;padding:7px 14px;color:#ff5252;font-weight:700;font-size:11px;font-family:inherit;cursor:pointer;margin-bottom:8px;display:inline-flex;align-items:center;gap:5px}
+.new-video-btn:hover{background:rgba(255,82,82,.15)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <label id="upload-zone">
+    <input type="file" accept="video/*" id="file-input" style="display:none">
+    <div style="font-size:44px;margin-bottom:8px;opacity:.4">🏊</div>
+    <div style="font-size:15px;color:#00e5ff;font-weight:600">Load Swim Video</div>
+    <div style="font-size:11px;color:#3a4a5a;margin-top:5px">Photo Library or Files</div>
+  </label>
+
+  <div id="player-area">
+    <button class="new-video-btn" onclick="resetVideo()">🔄 New Video</button>
+    <div id="status-bar"></div>
+
+    <!-- SETUP -->
+    <div class="setup-bar">
+      <div class="setup-row">
+        <span class="setup-label">Camera</span>
+        <div class="u-toggle" id="cam-toggle">
+          <button id="cam-fixed" class="on" onclick="setCamMode('fixed')">Fixed / Stationary</button>
+          <button id="cam-follow" onclick="setCamMode('follow')">Walking with Swimmer</button>
+        </div>
+      </div>
+      <div class="setup-row">
+        <span class="setup-label">Strokes</span>
+        <div class="u-toggle" id="stroke-toggle">
+          <button class="on" id="stroke-on" onclick="setStrokeDetect(true)">On</button>
+          <button id="stroke-off" onclick="setStrokeDetect(false)">Off</button>
+        </div>
+        <span class="setup-unit" style="color:#3a5a6a">← stroke counting &amp; type detection</span>
+      </div>
+      <div class="setup-row" id="lane-row">
+        <span class="setup-label">Swimmer</span>
+        <button class="btn btn-sm" id="lane-btn" onclick="startLaneSelect()" style="font-size:10px">👆 Tap Swimmer on Video</button>
+        <span id="lane-val" style="font-size:10px;color:#76ff03;min-width:60px">All (no filter)</span>
+        <button class="btn btn-sm" id="lane-clear-btn" onclick="clearLane()" style="font-size:10px;display:none">✕ Clear</button>
+        <span class="setup-unit" style="color:#3a5a6a">← isolate one lane</span>
+      </div>
+      <div class="setup-row">
+        <span class="setup-label">Course</span>
+        <div class="u-toggle" id="course-toggle">
+          <button class="on" id="c-scy" onclick="setCourse('SCY')">SCY 25yd</button>
+          <button id="c-lcm" onclick="setCourse('LCM')">LCM 50m</button>
+          <button id="c-scm" onclick="setCourse('SCM')">SCM 25m</button>
+        </div>
+        <span class="setup-unit" id="course-conv" style="color:#76ff03"></span>
+      </div>
+      <div class="setup-row">
+        <span class="setup-label">Event</span>
+        <select class="setup-input" id="evt-dist" onchange="updateSetup()" style="width:75px;text-align:left;padding:6px 4px">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+          <option value="400">400</option>
+          <option value="500">500</option>
+          <option value="800">800</option>
+          <option value="1000">1000</option>
+          <option value="1500">1500</option>
+          <option value="1650">1650</option>
+        </select>
+        <select class="setup-input" id="evt-stroke" onchange="updateSetup()" style="width:72px;text-align:left;padding:6px 4px">
+          <option value="free" selected>Free</option>
+          <option value="back">Back</option>
+          <option value="breast">Breast</option>
+          <option value="fly">Fly</option>
+          <option value="IM">IM</option>
+        </select>
+        <div class="u-toggle" id="evt-type-toggle">
+          <button class="on" id="evt-ind" onclick="setEvtType('ind')">Individual</button>
+          <button id="evt-relay" onclick="setEvtType('relay')">4× Relay</button>
+        </div>
+        <span class="setup-unit" id="lap-dist"></span>
+      </div>
+      <div class="setup-row" id="pool-mark-row" style="display:flex">
+        <span class="setup-label">Pool Edges</span>
+        <button class="btn btn-sm" id="mark-left-btn" onclick="startMark('left')" style="font-size:10px">◀ Tap Left Wall</button>
+        <span id="mark-left-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
+        <button class="btn btn-sm" id="mark-right-btn" onclick="startMark('right')" style="font-size:10px">Tap Right Wall ▶</button>
+        <span id="mark-right-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
+        <span class="setup-unit" style="color:#3a5a6a">← tap walls on video</span>
+      </div>
+      <div class="setup-row">
+        <span class="setup-label">Height</span>
+        <div id="ht-imp" style="display:flex;gap:3px;align-items:center">
+          <input type="number" class="setup-input" id="ht-ft" value="5" style="width:48px" onchange="updateSetup()">
+          <span class="setup-unit">ft</span>
+          <input type="number" class="setup-input" id="ht-in" value="6" style="width:48px" onchange="updateSetup()">
+          <span class="setup-unit">in</span>
+        </div>
+        <div id="ht-met" style="display:none;gap:3px;align-items:center">
+          <input type="number" class="setup-input" id="ht-cm" value="168" style="width:60px" onchange="updateSetup()">
+          <span class="setup-unit">cm</span>
+        </div>
+        <div class="u-toggle">
+          <button class="on" id="hu-imp" onclick="setHU('imp')">ft/in</button>
+          <button id="hu-met" onclick="setHU('met')">cm</button>
+        </div>
+        <span class="setup-unit" id="ht-conv" style="color:#76ff03"></span>
+      </div>
+      <div class="setup-summary" id="setup-sum"></div>
+    </div>
+
+    <!-- VIDEO -->
+    <div class="canvas-wrap" id="cw">
+      <video id="vid" playsinline webkit-playsinline preload="auto"></video>
+      <canvas id="lane-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2"></canvas>
+      <canvas id="draw-canvas"></canvas>
+    </div>
+    <div class="info-bar">
+      <div><span id="time-display">--:--.--</span><span class="fr">F<b id="fn">--</b></span></div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span id="cur-speed" style="font-size:13px;font-weight:800;color:#76ff03;display:none"></span>
+        <span id="stroke-badge" class="stroke-badge stroke-unknown" style="display:none"></span>
+        <span id="spd-disp" style="font-size:11px;font-weight:700;color:#3a4a5a">1.00x</span>
+        <span class="mode-d mp" id="mode-d">▶ PLAY</span>
+      </div>
+    </div>
+
+    <!-- SPEED GRAPH -->
+    <div class="graph-box">
+      <div id="scan-progress"></div>
+      <div class="graph-hdr">
+        <span class="graph-t">Speed <small style="color:#5a7a8a;font-weight:400">(background optical flow)</small></span>
+        <div class="graph-ctrls">
+          <span id="scan-st" style="font-size:10px;color:#3a4a5a"></span>
+          <div class="u-toggle" id="xa-tog" style="display:none">
+            <button class="on" id="xa-time" onclick="setXA('time')">Time</button>
+            <button id="xa-dist" onclick="setXA('dist')">Distance</button>
+          </div>
+          <button class="scan-btn" id="scan-btn" onclick="scanVideo()">🔍 Scan Video</button>
+        </div>
+      </div>
+      <canvas id="graph-canvas"></canvas>
+      <div class="graph-info">
+        <span>← Tap graph to seek →</span>
+        <span id="peak-info" style="color:#ffd740"></span>
+        <span id="g-hover" style="color:#00e5ff"></span>
+      </div>
+    </div>
+
+    <!-- MOTION ENERGY GRAPH (stroke rhythm) -->
+    <div class="motion-box" id="motion-box" style="display:none">
+      <div class="graph-hdr">
+        <span class="graph-t">Stroke Rhythm <small style="color:#5a7a8a;font-weight:400">(<span style="color:#ff9800">◼ left</span> · <span style="color:#00e5ff">◼ right</span> arm motion)</small></span>
+        <span id="stroke-detect" style="font-size:11px;font-weight:700"></span>
+      </div>
+      <canvas id="motion-canvas"></canvas>
+      <div class="graph-info">
+        <span id="stroke-info" style="color:#ffb74d"></span>
+        <span id="stroke-rate" style="color:#64b5f6"></span>
+      </div>
+    </div>
+
+    <!-- TIMING EVENTS -->
+    <div class="timing-box" id="timing-box">
+      <h3>Timing Events</h3>
+      <div class="timing-grid">
+        <div class="timing-item"><div class="tl">Beep (Start Tone)</div><div class="tv" id="tv-beep">--</div></div>
+        <div class="timing-item"><div class="tl">Block Departure</div><div class="tv" id="tv-block">--</div></div>
+        <div class="timing-item"><div class="tl">Reaction Time</div><div class="tv" id="tv-react">--</div></div>
+      </div>
+      <div class="wall-times" id="wall-times-box" style="display:none">
+        <div class="wt-label">Wall Touches (tap to seek)</div>
+        <div class="wt-row" id="wall-times-row"></div>
+      </div>
+      <div id="lap-splits-box" style="display:none;margin-top:6px">
+        <div class="wt-label" style="font-size:9px;color:#3a5a6a;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Lap Splits</div>
+        <div class="wt-row" id="lap-splits-row" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+    </div>
+
+    <!-- ANALYSIS SUMMARY -->
+    <div class="analysis-box" id="analysis-box">
+      <h3>Analysis Summary</h3>
+      <div class="analysis-grid" id="analysis-grid"></div>
+    </div>
+
+    <!-- TRANSPORT -->
+    <div class="frame-row">
+      <button class="btn" onclick="step(-1)">◀ 1 Frame</button>
+      <button class="btn" onclick="nudge(-0.5)">-0.5s</button>
+      <button class="btn btn-play" id="play-btn" onclick="toggle()">▶ PLAY</button>
+      <button class="btn" onclick="nudge(0.5)">+0.5s</button>
+      <button class="btn" onclick="step(1)">1 Frame ▶</button>
+    </div>
+    <div class="frame10-row">
+      <button class="btn" onclick="step(-10)">⏪ 10 Frames</button>
+      <button class="btn" id="pb2" onclick="toggle()" style="background:transparent;border:1px dashed rgba(255,255,255,.08);color:#3a4a5a;font-size:10px">Pause to draw</button>
+      <button class="btn" onclick="step(10)">10 Frames ⏩</button>
+    </div>
+    <div class="speed-row">
+      <span class="sp-label">SPEED</span>
+      <button class="btn btn-sm" id="spd-01" onclick="setSpd(0.1)">0.1x</button>
+      <button class="btn btn-sm" id="spd-025" onclick="setSpd(0.25)">0.25x</button>
+      <button class="btn btn-sm" id="spd-05" onclick="setSpd(0.5)">0.5x</button>
+      <button class="btn btn-sm btn-on" id="spd-1" onclick="setSpd(1)">1x</button>
+      <button class="btn btn-sm" id="spd-2" onclick="setSpd(2)">2x</button>
+      <button class="btn btn-sm" id="spd-4" onclick="setSpd(4)">4x</button>
+      <button class="btn btn-sm" id="spd-10" onclick="setSpd(10)">10x</button>
+    </div>
+
+    <!-- DRAWING -->
+    <div class="draw-bar">
+      <div class="draw-row" style="margin-bottom:8px">
+        <span class="dl">DRAW</span>
+        <button class="btn tool-btn" id="t-draw" onclick="setTool('draw')" style="background:rgba(255,215,64,.12);border:1px solid #ffd740;color:#ffd740">✏️ Draw</button>
+        <button class="btn tool-btn" id="t-erase" onclick="setTool('erase')" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:#7a8a9a">🧹 Erase</button>
+        <div class="divider"></div>
+        <button class="btn tool-btn" onclick="undoDraw()" style="color:#80d8ff">↩ Undo</button>
+        <button class="btn tool-btn" onclick="clearDraw()" style="color:#ff5252">🗑 Clear</button>
+        <div class="divider"></div>
+        <button class="save-btn" onclick="saveFrame()">📸 Save</button>
+      </div>
+      <div class="draw-row">
+        <span class="dl">COLOR</span>
+        <div class="swatch on" id="sw-r" onclick="setColor('#ff3333')" style="background:#ff3333"></div>
+        <div class="swatch" id="sw-b" onclick="setColor('#000000')" style="background:#000;border:2px solid rgba(255,255,255,.15)"></div>
+        <div class="swatch" id="sw-w" onclick="setColor('#ffffff')" style="background:#fff"></div>
+        <div class="divider"></div>
+        <span class="dl">SIZE</span>
+        <input type="range" class="w-slider" min="2" max="20" value="4" oninput="lw=parseInt(this.value);document.getElementById('wv').textContent=lw+'px'">
+        <span id="wv" style="font-size:11px;color:#5a7a8a;min-width:24px">4px</span>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong style="color:#3a4a5a">Fixed camera:</strong> The scanner tracks the swimmer's position via <strong style="color:#00e5ff">motion centroid</strong> — where movement is happening in the frame. Works whether zoomed in or out. Optionally tap the pool walls on the video for precise calibration; otherwise it auto-calibrates from total movement vs. entered distance.<br>
+      <strong style="color:#3a4a5a">Walking with swimmer:</strong> Tracks <strong style="color:#00e5ff">background motion</strong> (lane lines, pool bottom, deck sliding through the frame) using 8 horizontal strips. Your walking speed = swimmer speed.<br>
+      <strong style="color:#3a4a5a">Stroke detection:</strong> Motion energy in the <strong style="color:#ffb74d">center of the frame</strong> reveals stroke rhythm. Breaststroke has sharp peaks with quiet glides; freestyle is more continuous.
+    </div>
+  </div>
+</div>
+
+<canvas id="sc" style="display:none"></canvas>
+
+<script>
+const Y2M=0.9144,M2Y=1/Y2M,FT2M=0.3048,IN2M=0.0254;
+let fps=30,rate=1,playing=false,videoReady=false;
+let tool='draw',dc='#ff3333',lw=4,isD=false,dStrokes=[],cStroke=[];
+let flowData=[],motionData=[],scanning=false,scanned=false,xAxis='time';
+let course='SCY',hFt=5,hIn=6,hCm=168,hUnit='imp';
+let evtDist=50,evtStroke='free',evtType='ind'; // event picker
+let numLaps=2; // computed from event + course
+let detectedStroke='unknown',speedUnit='yd/s';
+let camMode='fixed'; // 'fixed' or 'follow'
+let poolLeftX=-1,poolRightX=-1,markingWall=null; // for fixed camera pool edge calibration
+let beepTime=-1,blockDepartTime=-1,wallTouches=[]; // timing events
+let laneY=-1,laneH=0.20; // lane region: center Y (0-1) and half-height (fraction of frame)
+let selectingLane=false;
+let strokeDetectOn=true;
+
+// Course definitions: pool length per lap (wall to wall)
+const COURSES={SCY:{len:25,unit:'yd',label:'SCY 25yd'},LCM:{len:50,unit:'m',label:'LCM 50m'},SCM:{len:25,unit:'m',label:'SCM 25m'}};
+function getLapLen(){return COURSES[course].len}
+function getLapUnit(){return COURSES[course].unit}
+function getTotalDist(){return getLapLen()*numLaps}
+function getDY(){const d=getTotalDist();return getLapUnit()==='yd'?d:d*M2Y}
+function getDM(){const d=getTotalDist();return getLapUnit()==='m'?d:d*Y2M}
+function getHM(){return hUnit==='imp'?(hFt*FT2M+hIn*IN2M):(hCm/100)}
+
+function setCourse(c){
+  course=c;
+  document.getElementById('c-scy').className=c==='SCY'?'on':'';
+  document.getElementById('c-lcm').className=c==='LCM'?'on':'';
+  document.getElementById('c-scm').className=c==='SCM'?'on':'';
+  updateSetup();
+}
+function setCamMode(m){
+  camMode=m;
+  document.getElementById('cam-fixed').className=m==='fixed'?'on':'';
+  document.getElementById('cam-follow').className=m==='follow'?'on':'';
+  document.getElementById('pool-mark-row').style.display=m==='fixed'?'flex':'none';
+  updateSetup();
+}
+function setStrokeDetect(on){
+  strokeDetectOn=on;
+  document.getElementById('stroke-on').className=on?'on':'';
+  document.getElementById('stroke-off').className=on?'':'on';
+}
+function setEvtType(t){
+  evtType=t;
+  document.getElementById('evt-ind').className=t==='ind'?'on':'';
+  document.getElementById('evt-relay').className=t==='relay'?'on':'';
+  updateSetup();
+}
+
+// IM stroke order per lap
+const IM_ORDER=['fly','back','breast','free'];
+function getStrokeForLap(lapIndex){
+  if(evtStroke!=='IM')return evtStroke;
+  // IM rotates fly→back→breast→free, with laps grouped by stroke
+  // 200 IM SCY = 8 laps: 2 fly, 2 back, 2 breast, 2 free
+  // 200 IM LCM = 4 laps: 1 fly, 1 back, 1 breast, 1 free
+  const lapsPerStroke=Math.max(1,Math.floor(numLaps/4));
+  const strokeIdx=Math.min(3,Math.floor(lapIndex/lapsPerStroke));
+  return IM_ORDER[strokeIdx];
+}
+function getStrokeLabel(s){
+  const labels={free:'Free',back:'Back',breast:'Breast',fly:'Fly',IM:'IM'};
+  return labels[s]||s;
+}
+function startMark(side){
+  markingWall=side;
+  V.pause();
+  const btn=document.getElementById(side==='left'?'mark-left-btn':'mark-right-btn');
+  btn.textContent='👆 Tap on video...';btn.style.color='#ffd740';
+}
+function handlePoolMark(e){
+  if(!markingWall)return;
+  const rect=V.getBoundingClientRect();
+  const xPct=(e.clientX-rect.left)/rect.width; // 0-1
+  if(markingWall==='left'){
+    poolLeftX=xPct;
+    document.getElementById('mark-left-val').textContent=Math.round(xPct*100)+'%';
+    document.getElementById('mark-left-btn').textContent='◀ Left Wall';document.getElementById('mark-left-btn').style.color='';
+  } else {
+    poolRightX=xPct;
+    document.getElementById('mark-right-val').textContent=Math.round(xPct*100)+'%';
+    document.getElementById('mark-right-btn').textContent='Right Wall ▶';document.getElementById('mark-right-btn').style.color='';
+  }
+  markingWall=null;
+  updateSetup();
+}
+function startLaneSelect(){
+  selectingLane=true;
+  V.pause();
+  document.getElementById('lane-btn').textContent='👆 Tap on your swimmer...';
+  document.getElementById('lane-btn').style.color='#ffd740';
+}
+function handleLaneSelect(e){
+  if(!selectingLane)return;
+  const rect=V.getBoundingClientRect();
+  const yPct=(e.clientY-rect.top)/rect.height; // 0-1
+  laneY=Math.max(0.1,Math.min(0.9,yPct));
+  selectingLane=false;
+  document.getElementById('lane-btn').textContent='👆 Tap Swimmer on Video';
+  document.getElementById('lane-btn').style.color='';
+  document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'%';
+  document.getElementById('lane-clear-btn').style.display='inline-flex';
+  drawLaneOverlay();
+}
+function clearLane(){
+  laneY=-1;selectingLane=false;
+  document.getElementById('lane-val').textContent='All (no filter)';
+  document.getElementById('lane-clear-btn').style.display='none';
+  drawLaneOverlay();
+}
+function drawLaneOverlay(){
+  const lo=document.getElementById('lane-overlay');
+  const rect=V.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  lo.width=rect.width*dpr;lo.height=rect.height*dpr;
+  lo.style.width=rect.width+'px';lo.style.height=rect.height+'px';
+  const lx=lo.getContext('2d');
+  lx.setTransform(dpr,0,0,dpr,0,0);
+  lx.clearRect(0,0,rect.width,rect.height);
+  if(laneY<0)return;
+
+  const h=rect.height;
+  const top=Math.max(0,(laneY-laneH)*h);
+  const bot=Math.min(h,(laneY+laneH)*h);
+
+  // Dim everything outside the lane
+  lx.fillStyle='rgba(0,0,0,0.5)';
+  lx.fillRect(0,0,rect.width,top);
+  lx.fillRect(0,bot,rect.width,h-bot);
+
+  // Lane border
+  lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
+  lx.strokeRect(0,top,rect.width,bot-top);
+  lx.setLineDash([]);
+
+  // Label
+  lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
+  lx.fillText('SELECTED LANE',6,top+14);
+}
+function setHU(u){
+  hUnit=u;document.getElementById('hu-imp').className=u==='imp'?'on':'';document.getElementById('hu-met').className=u==='met'?'on':'';
+  document.getElementById('ht-imp').style.display=u==='imp'?'flex':'none';document.getElementById('ht-met').style.display=u==='met'?'flex':'none';
+  if(u==='met'){hCm=Math.round(getHM()*100);document.getElementById('ht-cm').value=hCm}
+  else{const m=hCm/100,ti=m/IN2M;hFt=Math.floor(ti/12);hIn=Math.round(ti%12);document.getElementById('ht-ft').value=hFt;document.getElementById('ht-in').value=hIn}
+  updateSetup();
+}
+function updateSetup(){
+  // Read event picker
+  evtDist=parseInt(document.getElementById('evt-dist').value)||50;
+  evtStroke=document.getElementById('evt-stroke').value;
+
+  // Compute total distance and laps
+  const totalEventDist=evtType==='relay'?evtDist*4:evtDist;
+  const cInfo=COURSES[course];
+  numLaps=Math.max(1,Math.round(totalEventDist/cInfo.len));
+
+  if(hUnit==='imp'){hFt=parseInt(document.getElementById('ht-ft').value)||0;hIn=parseInt(document.getElementById('ht-in').value)||0}
+  else{hCm=parseInt(document.getElementById('ht-cm').value)||0}
+  const total=getTotalDist();
+  document.getElementById('course-conv').textContent=cInfo.len+' '+cInfo.unit+'/lap';
+  const hm=getHM();
+  document.getElementById('ht-conv').textContent=hUnit==='imp'?'= '+Math.round(hm*100)+' cm':'= '+Math.floor(hm/FT2M)+"'"+Math.round((hm%FT2M)/IN2M)+'"';
+
+  // Event label
+  const evtLabel=evtType==='relay'?'4×'+evtDist:''+evtDist;
+  const strokeLabel=getStrokeLabel(evtStroke);
+  document.getElementById('lap-dist').textContent=evtLabel+' '+strokeLabel+' · '+numLaps+' laps · '+total+' '+cInfo.unit;
+
+  const convText=cInfo.unit==='yd'?'('+getDM().toFixed(1)+' m)':'('+getDY().toFixed(1)+' yds)';
+  document.getElementById('setup-sum').textContent=course+' · '+evtLabel+' '+strokeLabel+' '+convText+' · '+numLaps+' lap'+(numLaps>1?'s':'')+' · Height: '+Math.round(hm*100)+' cm';
+  if(scanned){drawGraph();drawMotionGraph()}
+}
+
+const V=document.getElementById('vid'),CW=document.getElementById('cw');
+const canvas=document.getElementById('draw-canvas'),ctx=canvas.getContext('2d');
+const gC=document.getElementById('graph-canvas'),gx=gC.getContext('2d');
+const mC=document.getElementById('motion-canvas'),mx=mC.getContext('2d');
+const sC=document.getElementById('sc'),sx=sC.getContext('2d',{willReadFrequently:true});
+
+function fmT(s){if(isNaN(s))return'--:--.--';return Math.floor(s/60)+':'+(s%60).toFixed(2).padStart(5,'0')}
+function fnF(s){return Math.round(s*fps)}
+function showSt(m,t){const e=document.getElementById('status-bar');e.textContent=m;e.className=t}
+
+function updateMode(){
+  const md=document.getElementById('mode-d'),p2=document.getElementById('pb2');
+  if(playing){CW.classList.remove('drawing');md.className='mode-d mp';md.textContent='▶ PLAY';p2.textContent='Pause to draw'}
+  else if(tool==='erase'){CW.classList.add('drawing');md.className='mode-d me';md.textContent='🧹 ERASE';p2.textContent='⏸ PAUSED'}
+  else{CW.classList.add('drawing');md.className='mode-d md';md.textContent='✏️ DRAW';p2.textContent='⏸ PAUSED'}
+}
+
+document.getElementById('file-input').addEventListener('change',function(e){
+  const f=e.target.files[0];if(!f)return;
+  showSt('Loading '+f.name+'...','loading');
+  document.getElementById('upload-zone').style.display='none';
+  document.getElementById('player-area').style.display='block';
+  V.src=URL.createObjectURL(f);V.load();
+  videoReady=false;dStrokes=[];cStroke=[];flowData=[];motionData=[];scanned=false;detectedStroke='unknown';
+  drawGraph();
+});
+
+V.addEventListener('loadedmetadata',function(){showSt(V.videoWidth+'×'+V.videoHeight+' · '+V.duration.toFixed(1)+'s','loading');resizeCanvas()});
+V.addEventListener('loadeddata',function(){videoReady=true;updateHUD();showSt('Ready — enter distance & laps, then Scan','ready')});
+V.addEventListener('canplay',function(){videoReady=true;resizeCanvas();showSt('Ready','ready')});
+V.addEventListener('error',function(){showSt('Error: '+(V.error?'Code '+V.error.code:'Unknown'),'error')});
+V.addEventListener('play',function(){playing=true;document.getElementById('play-btn').className='btn btn-pause';document.getElementById('play-btn').innerHTML='⏸ PAUSE';updateMode();if(V.requestVideoFrameCallback)V.requestVideoFrameCallback(onVF)});
+V.addEventListener('pause',function(){playing=false;document.getElementById('play-btn').className='btn btn-play';document.getElementById('play-btn').innerHTML='▶ PLAY';updateMode()});
+V.addEventListener('ended',function(){playing=false;document.getElementById('play-btn').className='btn btn-play';document.getElementById('play-btn').innerHTML='▶ PLAY';updateMode()});
+V.addEventListener('click',function(e){if(selectingLane){handleLaneSelect(e);return}if(markingWall){handlePoolMark(e);return}if(videoReady&&!scanning)toggle()});
+
+function resizeCanvas(){const r=V.getBoundingClientRect(),d=window.devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;canvas.style.width=r.width+'px';canvas.style.height=r.height+'px';ctx.setTransform(d,0,0,d,0,0);redrawAll()}
+window.addEventListener('resize',function(){if(V.src){resizeCanvas();drawLaneOverlay();drawGraph();if(scanned)drawMotionGraph()}});
+
+let fpsS=[];
+function onVF(n,m){updateHUD();if(scanned){drawGraph();drawMotionGraph()}fpsS.push(m.mediaTime);
+if(fpsS.length>20){const d=[];for(let i=1;i<fpsS.length;i++){const x=fpsS[i]-fpsS[i-1];if(x>.001&&x<.2)d.push(x)}
+if(d.length>10){const a=d.reduce((a,b)=>a+b,0)/d.length,dt=Math.round(1/a);if(dt>10&&dt<240)fps=dt}fpsS=fpsS.slice(-10)}
+if(!V.paused&&V.requestVideoFrameCallback)V.requestVideoFrameCallback(onVF)}
+setInterval(function(){if(V.src&&V.readyState>0){updateHUD();if(scanned&&!scanning){drawGraph();drawMotionGraph()}}},100);
+
+function updateHUD(){
+  document.getElementById('time-display').textContent=fmT(V.currentTime);
+  document.getElementById('fn').textContent=fnF(V.currentTime);
+  const sd=document.getElementById('spd-disp');sd.textContent=rate.toFixed(2)+'x';sd.style.color=rate===1?'#3a4a5a':'#ffd740';
+  if(scanned&&flowData.length>2){
+    const t=V.currentTime;let spd=0;
+    for(let i=0;i<flowData.length;i++){if(flowData[i].time>=t){spd=flowData[i].speed;break}spd=flowData[i].speed}
+    const el=document.getElementById('cur-speed');
+    el.style.display='inline';el.textContent=spd.toFixed(2)+' '+speedUnit;
+  }
+  if(detectedStroke!=='unknown'){
+    const sb=document.getElementById('stroke-badge');sb.style.display='inline-block';
+    const labels={breast:'BREAST',free:'FREE',back:'BACK'};
+    sb.textContent=labels[detectedStroke]||detectedStroke.toUpperCase();
+    sb.className='stroke-badge stroke-'+detectedStroke;
+  }
+}
+
+function toggle(){if(!scanning){playing?V.pause():V.play()}}
+function step(n){V.pause();V.currentTime=Math.max(0,Math.min(V.duration,V.currentTime+n/fps));updateHUD();if(scanned){drawGraph();drawMotionGraph()}}
+function nudge(s){V.currentTime=Math.max(0,Math.min(V.duration,V.currentTime+s));updateHUD();if(scanned){drawGraph();drawMotionGraph()}}
+const speeds=[0.1,0.25,0.5,1,2,4,10];
+function setSpd(r){rate=r;V.playbackRate=r;updateHUD();speeds.forEach(function(s){const id='spd-'+String(s).replace('.',''),el=document.getElementById(id);if(el)el.className='btn btn-sm'+(Math.abs(rate-s)<.01?' btn-on':'')})}
+
+// ===== SCANNER: FIXED camera (track swimmer) or FOLLOW camera (track background) =====
+async function scanVideo(){
+  if(scanning||!videoReady)return;
+  scanning=true;scanned=false;flowData=[];motionData=[];
+
+  const btn=document.getElementById('scan-btn');
+  btn.className='scan-btn scanning';btn.textContent='Scanning...';btn.disabled=true;
+  V.pause();
+
+  const sampleFps=15;
+  const totalSamples=Math.floor(V.duration*sampleFps);
+  const sw=320,sh=180;
+  sC.width=sw;sC.height=sh;
+
+  // Stroke rhythm region: use lane band if selected, otherwise center 50%
+  const centerY=laneY>=0?Math.max(0,Math.floor((laneY-laneH)*sh)):Math.floor(sh*0.25);
+  const centerH=laneY>=0?Math.min(sh,Math.floor((laneY+laneH)*sh))-centerY:Math.floor(sh*0.5);
+
+  // For follow mode: background strips
+  const numStrips=8,stripH=Math.floor(sh*0.08),strips=[];
+  for(let i=0;i<4;i++) strips.push({y:Math.floor(sh*i*0.08),h:stripH});
+  for(let i=0;i<4;i++) strips.push({y:Math.floor(sh*(0.68+i*0.08)),h:stripH});
+
+  let prevFrame=null,prevCenter=null,prevTopData=null,prevStrips=null;
+  const rawDisplacements=[],rawMotion=[];
+  const progress=document.getElementById('scan-progress');
+
+  for(let i=0;i<=totalSamples;i++){
+    const t=i/sampleFps;
+    V.currentTime=t;
+    await new Promise(function(resolve){
+      const onS=function(){V.removeEventListener('seeked',onS);resolve()};
+      V.addEventListener('seeked',onS);setTimeout(resolve,200);
+    });
+
+    sx.drawImage(V,0,0,sw,sh);
+    const centerData=sx.getImageData(0,centerY,sw,centerH).data;
+
+    if(i>0){
+      if(camMode==='fixed'){
+        // FIXED CAMERA: find swimmer via motion centroid
+        const frameData=sx.getImageData(0,0,sw,sh).data;
+        if(prevFrame){
+          let motionWX=0,motionTotal=0;
+          const step=2;
+          // Lane filter: restrict Y range if a lane is selected
+          const yStart=laneY>=0?Math.max(0,Math.floor((laneY-laneH)*sh)):0;
+          const yEnd=laneY>=0?Math.min(sh,Math.floor((laneY+laneH)*sh)):sh;
+          for(let y=yStart;y<yEnd;y+=step){
+            for(let x=0;x<sw;x+=step){
+              const idx=(y*sw+x)*4;
+              const diff=Math.abs(frameData[idx]-prevFrame[idx])
+                        +Math.abs(frameData[idx+1]-prevFrame[idx+1])
+                        +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
+              if(diff>40){motionWX+=x*diff;motionTotal+=diff}
+            }
+          }
+          const swimmerX=motionTotal>0?motionWX/motionTotal:sw/2;
+          rawDisplacements.push({time:t,posX:swimmerX/sw});
+        }
+        prevFrame=new Uint8ClampedArray(frameData);
+
+      } else {
+        // FOLLOW CAMERA: track background strips
+        const currentStrips=strips.map(function(s){
+          const data=sx.getImageData(0,s.y,sw,s.h).data;
+          return colProfile(data,sw,s.h);
+        });
+        if(prevStrips){
+          const shifts=[];
+          for(let s=0;s<numStrips;s++) shifts.push(findShiftProfile(prevStrips[s],currentStrips[s],sw));
+          shifts.sort(function(a,b){return a-b});
+          const med=shifts.length%2===0?(shifts[shifts.length/2-1]+shifts[shifts.length/2])/2:shifts[Math.floor(shifts.length/2)];
+          rawDisplacements.push({time:t,shift:Math.abs(med)});
+        }
+        prevStrips=currentStrips;
+      }
+
+      // Motion energy (stroke rhythm) — both modes
+      // Track LEFT and RIGHT halves separately to detect individual arm strokes
+      if(prevCenter){
+        let cMot=0,leftMot=0,rightMot=0;
+        const step=4;
+        const halfW=Math.floor(sw/2);
+        for(let row=0;row<centerH;row+=2){
+          for(let col=0;col<sw;col+=2){
+            const p=(row*sw+col)*4;
+            const g=(centerData[p]+centerData[p+1]+centerData[p+2])/3;
+            const pg=(prevCenter[p]+prevCenter[p+1]+prevCenter[p+2])/3;
+            const d=Math.abs(g-pg);
+            cMot+=d;
+            if(col<halfW)leftMot+=d; else rightMot+=d;
+          }
+        }
+        const nPix=(centerH/2)*(sw/2);
+        cMot/=nPix;leftMot/=(nPix/2);rightMot/=(nPix/2);
+
+        if(camMode==='follow'){
+          let bgMot=0;
+          const topData=sx.getImageData(0,0,sw,Math.floor(sh*0.12)).data;
+          if(prevTopData){
+            for(let p=0;p<topData.length;p+=4*step){
+              const g=(topData[p]+topData[p+1]+topData[p+2])/3;
+              const pg=(prevTopData[p]+prevTopData[p+1]+prevTopData[p+2])/3;
+              bgMot+=Math.abs(g-pg);
+            }
+            bgMot/=(topData.length/(4*step));
+          }
+          prevTopData=new Uint8ClampedArray(topData);
+          cMot=Math.max(0,cMot-bgMot*0.8);
+          leftMot=Math.max(0,leftMot-bgMot*0.8);
+          rightMot=Math.max(0,rightMot-bgMot*0.8);
+        }
+        rawMotion.push({time:t,energy:cMot,left:leftMot,right:rightMot});
+      }
+    }
+
+    prevCenter=new Uint8ClampedArray(centerData);
+    progress.style.width=(i/totalSamples*100)+'%';
+    document.getElementById('scan-st').textContent=Math.round(i/totalSamples*100)+'%';
+    if(i%3===0)await new Promise(r=>setTimeout(r,0));
+  }
+
+  // ===== CALIBRATE SPEED =====
+  const totalYards=getDY();
+  const totalMeters=getDM();
+  const useMetric=getLapUnit()==='m';
+  const totalDistInUnit=useMetric?totalMeters:totalYards;
+  speedUnit=useMetric?'m/s':'yd/s';
+  const dt=1/sampleFps;
+  let rawSpeeds=[];
+
+  if(camMode==='fixed'){
+    // Fixed camera: swimmer position in normalized x (0-1)
+    // Step 1: Smooth posX with a wide median+mean filter to remove noise
+    const posArr=rawDisplacements.map(function(d){return d.posX});
+    const smoothR=4; // ±4 frames at 15fps = ±0.27s
+    const smoothPos=posArr.map(function(_,i){
+      const lo=Math.max(0,i-smoothR),hi=Math.min(posArr.length-1,i+smoothR);
+      const window=[];
+      for(let j=lo;j<=hi;j++)window.push(posArr[j]);
+      window.sort(function(a,b){return a-b});
+      // Trimmed mean: drop lowest and highest, average the rest
+      if(window.length>4){window.shift();window.pop()}
+      return window.reduce(function(a,b){return a+b},0)/window.length;
+    });
+
+    // Step 2: Calibrate — map normalized displacement to real distance
+    let normPerUnit;
+    if(poolLeftX>=0&&poolRightX>poolLeftX){
+      const poolSpan=poolRightX-poolLeftX;
+      const lapDist=getLapLen(); // in course units
+      normPerUnit=poolSpan/lapDist;
+    } else {
+      let totalTravel=0;
+      for(let i=1;i<smoothPos.length;i++){
+        totalTravel+=Math.abs(smoothPos[i]-smoothPos[i-1]);
+      }
+      normPerUnit=totalTravel>0?totalTravel/totalDistInUnit:1;
+    }
+
+    // Step 3: Compute speed from smoothed positions
+    for(let i=1;i<smoothPos.length;i++){
+      const dx=Math.abs(smoothPos[i]-smoothPos[i-1]);
+      rawSpeeds.push({time:rawDisplacements[i].time,speed:dx/(normPerUnit*dt)});
+    }
+
+  } else {
+    // Follow camera: background pixel shift
+    const totalPx=rawDisplacements.reduce(function(s,d){return s+d.shift},0);
+    const pxPerUnit=totalPx>0?totalPx/totalDistInUnit:1;
+    rawSpeeds=rawDisplacements.map(function(d){
+      return{time:d.time,speed:d.shift/(pxPerUnit*dt)};
+    });
+  }
+
+  // Smooth speed with wider window
+  const win=5; // ±5 frames at 15fps = ±0.33s window
+  flowData=[];let cumDist=0;
+  for(let i=0;i<rawSpeeds.length;i++){
+    let sum=0,cnt=0;
+    for(let j=Math.max(0,i-win);j<=Math.min(rawSpeeds.length-1,i+win);j++){sum+=rawSpeeds[j].speed;cnt++}
+    const ss=sum/cnt;cumDist+=ss*dt;
+    flowData.push({time:rawSpeeds[i].time,speed:ss,distance:cumDist});
+  }
+
+  // Smooth motion energy (including left/right channels)
+  motionData=[];
+  for(let i=0;i<rawMotion.length;i++){
+    let sumE=0,sumL=0,sumR=0,cnt=0;
+    for(let j=Math.max(0,i-2);j<=Math.min(rawMotion.length-1,i+2);j++){
+      sumE+=rawMotion[j].energy;sumL+=rawMotion[j].left;sumR+=rawMotion[j].right;cnt++;
+    }
+    motionData.push({time:rawMotion[i].time,energy:sumE/cnt,left:sumL/cnt,right:sumR/cnt});
+  }
+
+  // ===== STROKE DETECTION =====
+  if(strokeDetectOn){
+    detectedStroke=detectStrokeType(motionData,sampleFps);
+  } else {
+    detectedStroke='unknown';
+    document.getElementById('stroke-detect').textContent='';
+  }
+
+  // ===== BEEP DETECTION =====
+  document.getElementById('scan-st').textContent='Detecting beep...';
+  beepTime=-1;blockDepartTime=-1;wallTouches=[];
+  try{
+    const bt=await detectBeep();
+    if(bt!==null)beepTime=bt;
+  }catch(e){console.warn('Beep detection error:',e)}
+
+  // ===== WALL TURN DETECTION =====
+  document.getElementById('scan-st').textContent='Finding wall turns...';
+  wallTouches=detectWallTurns(rawDisplacements,sampleFps);
+
+  // ===== BLOCK DEPARTURE =====
+  blockDepartTime=detectBlockDeparture(motionData,beepTime);
+
+  // ===== WALL-TO-WALL SPEED CALIBRATION =====
+  if(wallTouches.length>0){
+    document.getElementById('scan-st').textContent='Calibrating speed from wall times...';
+    flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,dt);
+  }
+
+  // Show timing events
+  showTimingEvents();
+
+  // ===== FIND PEAKS & STATS =====
+  let peakSpd=0,peakTime=0,avgSpd=0;
+  flowData.forEach(function(d){if(d.speed>peakSpd){peakSpd=d.speed;peakTime=d.time}avgSpd+=d.speed});
+  avgSpd/=flowData.length||1;
+  document.getElementById('peak-info').textContent='Peak: '+peakSpd.toFixed(2)+' '+speedUnit+' @ '+fmT(peakTime);
+
+  const strokeCount=strokeDetectOn?countStrokes(motionData):0;
+  const swimTime=flowData.length>0?flowData[flowData.length-1].time-flowData[0].time:0;
+  const strokeRate=strokeDetectOn&&swimTime>0?(strokeCount/(swimTime/60)).toFixed(0):'--';
+
+  if(strokeDetectOn){
+    document.getElementById('stroke-info').textContent=strokeCount+' strokes detected';
+    document.getElementById('stroke-rate').textContent='Rate: '+strokeRate+' strokes/min';
+  } else {
+    document.getElementById('stroke-info').textContent='Stroke detection off';
+    document.getElementById('stroke-rate').textContent='';
+  }
+
+  showAnalysis(peakSpd,avgSpd,strokeCount,strokeRate,swimTime);
+
+  scanning=false;scanned=true;
+  btn.className='scan-btn';btn.textContent='🔍 Rescan';btn.disabled=false;
+  progress.style.width='0%';
+  document.getElementById('scan-st').textContent='Done · '+(camMode==='fixed'?'Fixed cam':'Following')+' mode';
+  document.getElementById('xa-tog').style.display='flex';
+  document.getElementById('motion-box').style.display=strokeDetectOn?'block':'none';
+
+  V.currentTime=0;updateHUD();drawGraph();drawMotionGraph();
+}
+
+// Compute column intensity profile (average each column to a single value)
+function colProfile(data,w,h){
+  const prof=new Float32Array(w);
+  for(let x=0;x<w;x++){
+    let sum=0;
+    for(let y=0;y<h;y++){
+      const idx=(y*w+x)*4;
+      sum+=(data[idx]+data[idx+1]+data[idx+2])/3;
+    }
+    prof[x]=sum/h;
+  }
+  return prof;
+}
+
+// Cross-correlation between two 1D profiles
+function findShiftProfile(prev,curr,w){
+  const maxShift=Math.min(40,Math.floor(w/4));
+  let bestShift=0,bestSAD=Infinity;
+  for(let s=-maxShift;s<=maxShift;s++){
+    let sad=0,cnt=0;
+    for(let x=maxShift;x<w-maxShift;x++){
+      const px=x+s;
+      if(px>=0&&px<w){sad+=Math.abs(prev[x]-curr[px]);cnt++}
+    }
+    if(cnt>0)sad/=cnt;
+    if(sad<bestSAD){bestSAD=sad;bestShift=s}
+  }
+  return bestShift;
+}
+
+// ===== STROKE TYPE DETECTION =====
+function detectStrokeType(motion,fps){
+  if(motion.length<fps*2)return 'unknown'; // need at least 2 seconds
+
+  const energies=motion.map(function(m){return m.energy});
+
+  // Compute autocorrelation to find dominant period
+  const maxLag=Math.min(energies.length-1,Math.floor(fps*3)); // up to 3 sec period
+  const mean=energies.reduce(function(a,b){return a+b},0)/energies.length;
+  const centered=energies.map(function(e){return e-mean});
+
+  const autocorr=[];
+  let var0=0;
+  for(let i=0;i<centered.length;i++)var0+=centered[i]*centered[i];
+
+  for(let lag=0;lag<=maxLag;lag++){
+    let sum=0;
+    for(let i=0;i<centered.length-lag;i++)sum+=centered[i]*centered[i+lag];
+    autocorr.push(sum/var0);
+  }
+
+  // Find first peak in autocorrelation after the initial drop (that's the dominant period)
+  let dominantLag=0,peakCorr=0;
+  let pastFirstDip=false;
+  for(let i=2;i<autocorr.length;i++){
+    if(!pastFirstDip&&autocorr[i]<autocorr[i-1])pastFirstDip=true;
+    if(pastFirstDip&&autocorr[i]>peakCorr&&autocorr[i]>0.1){
+      peakCorr=autocorr[i];dominantLag=i;
+    }
+    if(pastFirstDip&&dominantLag>0&&autocorr[i]<peakCorr*0.7)break; // past the peak
+  }
+
+  const dominantPeriod=dominantLag/fps; // in seconds
+
+  // Compute coefficient of variation (CV) of motion energy
+  const std=Math.sqrt(energies.reduce(function(s,e){return s+(e-mean)*(e-mean)},0)/energies.length);
+  const cv=mean>0?std/mean:0;
+
+  // Compute peak-to-valley ratio
+  const sorted=energies.slice().sort(function(a,b){return a-b});
+  const p10=sorted[Math.floor(sorted.length*0.1)]; // 10th percentile (valleys)
+  const p90=sorted[Math.floor(sorted.length*0.9)]; // 90th percentile (peaks)
+  const peakValleyRatio=p10>0?p90/p10:p90;
+
+  // Decision logic — freestyle is the default; breaststroke requires very strong evidence
+  // because camera walking creates rhythmic bob that can mimic breaststroke's pulse-glide.
+  // True breaststroke has: long period (>1.3s), very high CV (>0.50), extreme peak-valley (>3.5)
+  // Freestyle: continuous arm turnover, lower CV, shorter period
+
+  const strokeLabel=document.getElementById('stroke-detect');
+  const stats='period: '+dominantPeriod.toFixed(2)+'s · CV: '+cv.toFixed(2)+' · P/V: '+peakValleyRatio.toFixed(1);
+
+  if(dominantPeriod>=1.3&&cv>0.50&&peakValleyRatio>3.5){
+    // Very strong breaststroke signal — the glide phase is nearly motionless
+    strokeLabel.innerHTML='<span class="stroke-badge stroke-breast">BREASTSTROKE</span>';
+    strokeLabel.innerHTML+='<span style="font-size:9px;color:#5a7a8a;margin-left:4px">'+stats+'</span>';
+    return 'breast';
+  } else if(dominantPeriod>=1.2&&cv>0.40&&peakValleyRatio>2.8){
+    strokeLabel.innerHTML='<span class="stroke-badge stroke-breast">LIKELY BREAST</span>';
+    strokeLabel.innerHTML+='<span style="font-size:9px;color:#5a7a8a;margin-left:4px">'+stats+'</span>';
+    return 'breast';
+  } else {
+    // Default to freestyle — most common stroke, and camera walk artifacts bias toward false breaststroke
+    strokeLabel.innerHTML='<span class="stroke-badge stroke-free">FREESTYLE</span>';
+    strokeLabel.innerHTML+='<span style="font-size:9px;color:#5a7a8a;margin-left:4px">'+stats+'</span>';
+    return 'free';
+  }
+}
+
+// Count strokes by detecting arm movement peaks on left/right halves
+function countStrokes(motion){
+  if(motion.length<5)return 0;
+
+  // For each side, find peaks where that side's motion spikes above its mean
+  // Each peak = one arm entering the water on that side
+  const leftE=motion.map(function(m){return m.left});
+  const rightE=motion.map(function(m){return m.right});
+
+  function countPeaks(arr){
+    const mean=arr.reduce(function(a,b){return a+b},0)/arr.length;
+    const thresh=mean*1.3;
+    let count=0,above=false;
+    for(let i=0;i<arr.length;i++){
+      if(arr[i]>thresh&&!above){count++;above=true}
+      if(arr[i]<mean*0.85)above=false;
+    }
+    return count;
+  }
+
+  const leftCount=countPeaks(leftE);
+  const rightCount=countPeaks(rightE);
+
+  // Total strokes = left arm entries + right arm entries
+  // For breaststroke, both sides peak together so count just one side
+  // Detect synchrony: if left and right peaks overlap frequently, it's symmetric
+  const totalE=motion.map(function(m){return m.energy});
+  const meanE=totalE.reduce(function(a,b){return a+b},0)/totalE.length;
+
+  // Check if left/right are correlated (breaststroke = high correlation, freestyle = alternating)
+  let syncCount=0,totalPeaks=0;
+  const lMean=leftE.reduce(function(a,b){return a+b},0)/leftE.length;
+  const rMean=rightE.reduce(function(a,b){return a+b},0)/rightE.length;
+  for(let i=0;i<motion.length;i++){
+    const lUp=leftE[i]>lMean*1.2;
+    const rUp=rightE[i]>rMean*1.2;
+    if(lUp||rUp)totalPeaks++;
+    if(lUp&&rUp)syncCount++;
+  }
+  const syncRatio=totalPeaks>0?syncCount/totalPeaks:0;
+
+  // If arms move together (sync > 60%), count peaks from total energy (breaststroke-style)
+  if(syncRatio>0.6){
+    return countPeaks(totalE);
+  }
+
+  // Otherwise, each arm entry is a stroke (freestyle alternating arms)
+  return leftCount+rightCount;
+}
+
+function showAnalysis(peakSpd,avgSpd,strokeCount,strokeRate,swimTime){
+  const box=document.getElementById('analysis-box');box.style.display='block';
+  const grid=document.getElementById('analysis-grid');
+  const labels={breast:'Breaststroke',free:'Freestyle',back:'Backstroke',fly:'Butterfly',unknown:'Unknown'};
+
+  // Event label
+  const evtLabel=(evtType==='relay'?'4×'+evtDist:evtDist)+' '+getStrokeLabel(evtStroke);
+
+  let html=
+    '<div class="analysis-item"><div class="al">Event</div><div class="av">'+evtLabel+'</div></div>'+
+    '<div class="analysis-item"><div class="al">Total Time</div><div class="av">'+swimTime.toFixed(1)+'<small>s</small></div></div>'+
+    '<div class="analysis-item"><div class="al">Peak Speed</div><div class="av">'+peakSpd.toFixed(2)+' <small>'+speedUnit+'</small></div></div>'+
+    '<div class="analysis-item"><div class="al">Avg Speed</div><div class="av">'+avgSpd.toFixed(2)+' <small>'+speedUnit+'</small></div></div>';
+
+  if(strokeDetectOn){
+    html+=
+      '<div class="analysis-item"><div class="al">Detected Stroke</div><div class="av">'+(labels[detectedStroke]||detectedStroke)+'</div></div>'+
+      '<div class="analysis-item"><div class="al">Strokes</div><div class="av">'+strokeCount+'</div></div>'+
+      '<div class="analysis-item"><div class="al">Stroke Rate</div><div class="av">'+strokeRate+' <small>/min</small></div></div>'+
+      '<div class="analysis-item"><div class="al">Dist/Stroke</div><div class="av">'+(strokeCount>0?(getTotalDist()/strokeCount).toFixed(1):'--')+' <small>'+getLapUnit()+'</small></div></div>';
+  }
+
+  html+=
+    '<div class="analysis-item"><div class="al">Distance</div><div class="av">'+getTotalDist()+' <small>'+getLapUnit()+'</small></div></div>'+
+    '<div class="analysis-item"><div class="al">Laps</div><div class="av">'+numLaps+'</div></div>';
+
+  // For IM, show stroke per lap
+  if(evtStroke==='IM'){
+    let imInfo='';
+    for(let i=0;i<numLaps;i++){
+      const s=getStrokeForLap(i);
+      imInfo+=(i>0?', ':'')+'L'+(i+1)+' '+getStrokeLabel(s);
+    }
+    html+='<div class="analysis-item" style="grid-column:1/-1"><div class="al">IM Order</div><div class="av" style="font-size:12px">'+imInfo+'</div></div>';
+  }
+
+  // For relay, show legs
+  if(evtType==='relay'){
+    const legLaps=Math.max(1,Math.round(evtDist/COURSES[course].len));
+    html+='<div class="analysis-item"><div class="al">Relay Legs</div><div class="av">4 × '+evtDist+' <small>'+getLapUnit()+'</small></div></div>'+
+          '<div class="analysis-item"><div class="al">Laps/Leg</div><div class="av">'+legLaps+'</div></div>';
+  }
+
+  grid.innerHTML=html;
+}
+
+// ===== SPEED GRAPH =====
+function setXA(a){xAxis=a;document.getElementById('xa-time').className=a==='time'?'on':'';document.getElementById('xa-dist').className=a==='dist'?'on':'';drawGraph()}
+
+function drawGraph(){
+  const rect=gC.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
+  gC.width=rect.width*dpr;gC.height=180*dpr;gC.style.height='180px';
+  gx.setTransform(dpr,0,0,dpr,0,0);
+  const W=rect.width,H=180,pad={t:14,r:16,b:28,l:44};
+  const gW=W-pad.l-pad.r,gH=H-pad.t-pad.b;
+  gx.clearRect(0,0,W,H);
+
+  if(!scanned||flowData.length<2){
+    gx.fillStyle='#2a3a4a';gx.font='12px IBM Plex Mono';gx.textAlign='center';
+    gx.fillText('Enter distance & laps → Scan Video',W/2,H/2);return;
+  }
+
+  const maxSpeed=Math.max(2,Math.ceil(Math.max(...flowData.map(function(d){return d.speed}))*1.2));
+  const xVals=flowData.map(function(d){return xAxis==='time'?d.time:d.distance});
+  const xMax=Math.max(...xVals)*1.02;
+  const dLabel=getLapUnit()==='m'?'m':'yd';
+
+  function svx(v){return pad.l+(v/xMax)*gW}
+  function svy(v){return pad.t+gH-Math.min(v,maxSpeed)/maxSpeed*gH}
+
+  // Grid
+  gx.strokeStyle='rgba(255,255,255,.07)';gx.lineWidth=1;
+  for(let i=0;i<=maxSpeed;i++){const y=svy(i);gx.beginPath();gx.moveTo(pad.l,y);gx.lineTo(W-pad.r,y);gx.stroke()}
+
+  // Y labels
+  gx.fillStyle='#5a7a8a';gx.font='bold 10px IBM Plex Mono';gx.textAlign='right';
+  for(let i=0;i<=maxSpeed;i++)gx.fillText(i,pad.l-6,svy(i)+4);
+  gx.save();gx.translate(10,pad.t+gH/2);gx.rotate(-Math.PI/2);
+  gx.textAlign='center';gx.fillStyle='#00e5ff';gx.font='bold 10px IBM Plex Mono';
+  gx.fillText(speedUnit,0,0);gx.restore();
+
+  // X labels
+  gx.textAlign='center';gx.fillStyle='#5a7a8a';gx.font='10px IBM Plex Mono';
+  for(let i=0;i<=6;i++){
+    const v=xMax*i/6;
+    if(xAxis==='time')gx.fillText(v.toFixed(1)+'s',svx(v),H-pad.b+16);
+    else gx.fillText(v.toFixed(0)+dLabel,svx(v),H-pad.b+16);
+  }
+
+  // Fill
+  gx.globalAlpha=0.15;gx.fillStyle='#00e5ff';
+  gx.beginPath();gx.moveTo(svx(xVals[0]),svy(0));
+  flowData.forEach(function(d,i){gx.lineTo(svx(xVals[i]),svy(d.speed))});
+  gx.lineTo(svx(xVals[xVals.length-1]),svy(0));gx.closePath();gx.fill();gx.globalAlpha=1;
+
+  // Speed line
+  gx.strokeStyle='rgba(0,229,255,.95)';gx.lineWidth=2.5;gx.lineJoin='round';gx.lineCap='round';
+  gx.beginPath();flowData.forEach(function(d,i){const x=svx(xVals[i]),y=svy(d.speed);i===0?gx.moveTo(x,y):gx.lineTo(x,y)});gx.stroke();
+
+  // Peak marker
+  let peakI=0;flowData.forEach(function(d,i){if(d.speed>flowData[peakI].speed)peakI=i});
+  const px=svx(xVals[peakI]),py=svy(flowData[peakI].speed);
+  gx.beginPath();gx.arc(px,py,5,0,Math.PI*2);gx.fillStyle='#76ff03';gx.fill();
+  gx.strokeStyle='rgba(0,0,0,.4)';gx.lineWidth=1.5;gx.stroke();
+  gx.fillStyle='#76ff03';gx.font='bold 9px IBM Plex Mono';gx.textAlign='center';
+  gx.fillText(flowData[peakI].speed.toFixed(2),px,py-10);
+
+  // Cursor
+  const ct=V.currentTime;
+  let ci=0;
+  for(let i=0;i<flowData.length;i++){if(flowData[i].time>=ct){ci=i;break}ci=i}
+  const cx=svx(xVals[ci]);
+  if(cx>=pad.l&&cx<=W-pad.r){
+    gx.strokeStyle='#ff3333';gx.lineWidth=2;
+    gx.beginPath();gx.moveTo(cx,pad.t);gx.lineTo(cx,pad.t+gH);gx.stroke();
+    gx.fillStyle='#ff3333';gx.beginPath();gx.moveTo(cx-5,pad.t);gx.lineTo(cx+5,pad.t);gx.lineTo(cx,pad.t+7);gx.closePath();gx.fill();
+  }
+}
+
+gC.addEventListener('click',function(e){
+  if(!scanned||flowData.length<2)return;
+  const rect=gC.getBoundingClientRect(),pL=44,pR=16;
+  const pct=(e.clientX-rect.left-pL)/(rect.width-pL-pR);
+  if(pct<0||pct>1)return;
+  const xVals=flowData.map(function(d){return xAxis==='time'?d.time:d.distance});
+  const xMax=Math.max(...xVals)*1.02;
+  const target=pct*xMax;
+  let closest=0;
+  for(let i=0;i<flowData.length;i++){const v=xAxis==='time'?flowData[i].time:flowData[i].distance;if(v>=target){closest=i;break}closest=i}
+  V.currentTime=flowData[closest].time;V.pause();updateHUD();drawGraph();drawMotionGraph();
+});
+
+gC.addEventListener('mousemove',function(e){
+  if(!scanned)return;
+  const rect=gC.getBoundingClientRect();const pct=(e.clientX-rect.left-44)/(rect.width-44-16);
+  if(pct<0||pct>1){document.getElementById('g-hover').textContent='';return}
+  const xVals=flowData.map(function(d){return xAxis==='time'?d.time:d.distance});
+  const xMax=Math.max(...xVals)*1.02;const target=pct*xMax;
+  let ci=0;for(let i=0;i<flowData.length;i++){const v=xAxis==='time'?flowData[i].time:flowData[i].distance;if(v>=target){ci=i;break}ci=i}
+  document.getElementById('g-hover').textContent=fmT(flowData[ci].time)+' · '+flowData[ci].speed.toFixed(2)+' '+speedUnit;
+});
+
+// ===== MOTION ENERGY GRAPH =====
+function drawMotionGraph(){
+  if(!scanned||motionData.length<2)return;
+  const rect=mC.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
+  mC.width=rect.width*dpr;mC.height=100*dpr;mC.style.height='100px';
+  mx.setTransform(dpr,0,0,dpr,0,0);
+  const W=rect.width,H=100,pad={t:8,r:16,b:20,l:44};
+  const gW=W-pad.l-pad.r,gH=H-pad.t-pad.b;
+  mx.clearRect(0,0,W,H);
+
+  const maxE=Math.max(...motionData.map(function(m){return Math.max(m.energy,m.left,m.right)}))*1.1;
+  const tMax=motionData[motionData.length-1].time*1.02;
+
+  function svx(t){return pad.l+(t/tMax)*gW}
+  function svy(e){return pad.t+gH-Math.min(e,maxE)/maxE*gH}
+
+  // Fill
+  mx.globalAlpha=0.08;
+  mx.fillStyle=detectedStroke==='breast'?'#ffb74d':'#64b5f6';
+  mx.beginPath();mx.moveTo(svx(motionData[0].time),svy(0));
+  motionData.forEach(function(m){mx.lineTo(svx(m.time),svy(m.energy))});
+  mx.lineTo(svx(motionData[motionData.length-1].time),svy(0));mx.closePath();mx.fill();
+  mx.globalAlpha=1;
+
+  // Left arm motion (orange)
+  mx.strokeStyle='rgba(255,152,0,.5)';mx.lineWidth=1;mx.lineJoin='round';mx.lineCap='round';
+  mx.beginPath();
+  motionData.forEach(function(m,i){const x=svx(m.time),y=svy(m.left);i===0?mx.moveTo(x,y):mx.lineTo(x,y)});
+  mx.stroke();
+
+  // Right arm motion (cyan)
+  mx.strokeStyle='rgba(0,229,255,.5)';mx.lineWidth=1;
+  mx.beginPath();
+  motionData.forEach(function(m,i){const x=svx(m.time),y=svy(m.right);i===0?mx.moveTo(x,y):mx.lineTo(x,y)});
+  mx.stroke();
+
+  // Combined line (brighter, on top)
+  mx.strokeStyle=detectedStroke==='breast'?'rgba(255,183,77,.8)':'rgba(100,181,246,.8)';
+  mx.lineWidth=1.5;mx.lineJoin='round';mx.lineCap='round';
+  mx.beginPath();
+  motionData.forEach(function(m,i){const x=svx(m.time),y=svy(m.energy);i===0?mx.moveTo(x,y):mx.lineTo(x,y)});
+  mx.stroke();
+
+  // Threshold line
+  const mean=motionData.reduce(function(s,m){return s+m.energy},0)/motionData.length;
+  const ty=svy(mean);
+  mx.strokeStyle='rgba(255,255,255,.15)';mx.lineWidth=1;mx.setLineDash([4,4]);
+  mx.beginPath();mx.moveTo(pad.l,ty);mx.lineTo(W-pad.r,ty);mx.stroke();mx.setLineDash([]);
+  mx.fillStyle='#3a4a5a';mx.font='8px IBM Plex Mono';mx.textAlign='left';mx.fillText('avg',pad.l+2,ty-3);
+
+  // X labels
+  mx.textAlign='center';mx.fillStyle='#5a7a8a';mx.font='9px IBM Plex Mono';
+  for(let i=0;i<=5;i++){const t=tMax*i/5;mx.fillText(t.toFixed(1)+'s',svx(t),H-2)}
+
+  // Y label
+  mx.save();mx.translate(10,pad.t+gH/2);mx.rotate(-Math.PI/2);mx.textAlign='center';
+  mx.fillStyle=detectedStroke==='breast'?'#ffb74d':'#64b5f6';mx.font='bold 9px IBM Plex Mono';
+  mx.fillText('Motion',0,0);mx.restore();
+
+  // Cursor
+  const ct=V.currentTime;
+  let ci=0;for(let i=0;i<motionData.length;i++){if(motionData[i].time>=ct){ci=i;break}ci=i}
+  const cx=svx(motionData[ci].time);
+  if(cx>=pad.l&&cx<=W-pad.r){
+    mx.strokeStyle='#ff3333';mx.lineWidth=1.5;
+    mx.beginPath();mx.moveTo(cx,pad.t);mx.lineTo(cx,pad.t+gH);mx.stroke();
+  }
+}
+
+mC.addEventListener('click',function(e){
+  if(!scanned||motionData.length<2)return;
+  const rect=mC.getBoundingClientRect(),pL=44,pR=16;
+  const pct=(e.clientX-rect.left-pL)/(rect.width-pL-pR);
+  if(pct<0||pct>1)return;
+  const tMax=motionData[motionData.length-1].time*1.02;
+  const target=pct*tMax;
+  let closest=0;
+  for(let i=0;i<motionData.length;i++){if(motionData[i].time>=target){closest=i;break}closest=i}
+  V.currentTime=motionData[closest].time;V.pause();updateHUD();drawGraph();drawMotionGraph();
+});
+
+// ===== DRAWING =====
+function setTool(t){
+  tool=t;
+  document.getElementById('t-draw').style.background=t==='draw'?'rgba(255,215,64,.12)':'rgba(255,255,255,.04)';
+  document.getElementById('t-draw').style.borderColor=t==='draw'?'#ffd740':'rgba(255,255,255,.08)';
+  document.getElementById('t-draw').style.color=t==='draw'?'#ffd740':'#7a8a9a';
+  document.getElementById('t-erase').style.background=t==='erase'?'rgba(255,82,82,.12)':'rgba(255,255,255,.04)';
+  document.getElementById('t-erase').style.borderColor=t==='erase'?'#ff5252':'rgba(255,255,255,.08)';
+  document.getElementById('t-erase').style.color=t==='erase'?'#ff5252':'#7a8a9a';
+  updateMode();
+}
+function setColor(c){dc=c;document.querySelectorAll('.swatch').forEach(function(el){el.classList.remove('on')});
+if(c==='#ff3333')document.getElementById('sw-r').classList.add('on');
+else if(c==='#000000')document.getElementById('sw-b').classList.add('on');
+else document.getElementById('sw-w').classList.add('on');
+if(tool==='erase')setTool('draw')}
+
+function getPos(e){const r=canvas.getBoundingClientRect();if(e.touches)return{x:e.touches[0].clientX-r.left,y:e.touches[0].clientY-r.top};return{x:e.clientX-r.left,y:e.clientY-r.top}}
+function startD(e){if(playing||scanning)return;e.preventDefault();isD=true;const p=getPos(e);cStroke=[{x:p.x,y:p.y,c:tool==='erase'?'e':dc,w:tool==='erase'?lw*4:lw,t:tool}]}
+function moveD(e){if(!isD||playing)return;e.preventDefault();const p=getPos(e),prev=cStroke[cStroke.length-1];
+if(tool==='erase'){ctx.globalCompositeOperation='destination-out';ctx.strokeStyle='rgba(0,0,0,1)';ctx.lineWidth=lw*4}
+else{ctx.globalCompositeOperation='source-over';ctx.strokeStyle=dc;ctx.lineWidth=lw}
+ctx.lineCap='round';ctx.lineJoin='round';ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(p.x,p.y);ctx.stroke();ctx.globalCompositeOperation='source-over';
+cStroke.push({x:p.x,y:p.y,c:tool==='erase'?'e':dc,w:tool==='erase'?lw*4:lw,t:tool})}
+function endD(e){if(!isD)return;e.preventDefault();isD=false;if(cStroke.length>1)dStrokes.push(cStroke.slice());cStroke=[]}
+
+canvas.addEventListener('touchstart',startD,{passive:false});canvas.addEventListener('touchmove',moveD,{passive:false});
+canvas.addEventListener('touchend',endD,{passive:false});canvas.addEventListener('touchcancel',endD,{passive:false});
+canvas.addEventListener('mousedown',startD);canvas.addEventListener('mousemove',moveD);
+canvas.addEventListener('mouseup',endD);canvas.addEventListener('mouseleave',endD);
+
+function redrawAll(){ctx.clearRect(0,0,canvas.width,canvas.height);dStrokes.forEach(function(stroke){if(stroke.length<2)return;for(let i=1;i<stroke.length;i++){const prev=stroke[i-1],pt=stroke[i];if(pt.t==='erase'){ctx.globalCompositeOperation='destination-out';ctx.strokeStyle='rgba(0,0,0,1)'}else{ctx.globalCompositeOperation='source-over';ctx.strokeStyle=pt.c}ctx.lineWidth=pt.w;ctx.lineCap='round';ctx.lineJoin='round';ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(pt.x,pt.y);ctx.stroke()}});ctx.globalCompositeOperation='source-over'}
+function undoDraw(){if(dStrokes.length){dStrokes.pop();resizeCanvas()}}
+function clearDraw(){dStrokes=[];ctx.clearRect(0,0,canvas.width,canvas.height)}
+
+function saveFrame(){
+  const r=V.getBoundingClientRect(),sc2=document.createElement('canvas');
+  sc2.width=V.videoWidth;sc2.height=V.videoHeight;const sx2=sc2.getContext('2d');
+  sx2.drawImage(V,0,0,V.videoWidth,V.videoHeight);
+  const rx=V.videoWidth/r.width,ry=V.videoHeight/r.height;
+  dStrokes.forEach(function(stroke){if(stroke.length<2)return;for(let i=1;i<stroke.length;i++){const prev=stroke[i-1],pt=stroke[i];if(pt.t==='erase')continue;sx2.strokeStyle=pt.c;sx2.lineWidth=pt.w*rx;sx2.lineCap='round';sx2.lineJoin='round';sx2.beginPath();sx2.moveTo(prev.x*rx,prev.y*ry);sx2.lineTo(pt.x*rx,pt.y*ry);sx2.stroke()}});
+  const link=document.createElement('a');link.download='swim-'+fnF(V.currentTime)+'.png';link.href=sc2.toDataURL('image/png');link.click();
+}
+
+document.addEventListener('keydown',function(e){
+  if(e.target.tagName==='INPUT')return;
+  switch(e.key){case' ':e.preventDefault();toggle();break;case'ArrowRight':e.preventDefault();step(e.shiftKey?10:1);break;case'ArrowLeft':e.preventDefault();step(e.shiftKey?-10:-1);break;case'd':case'D':setTool('draw');break;case'e':case'E':setTool('erase');break;case'z':case'Z':if(e.metaKey||e.ctrlKey)undoDraw();break}
+});
+
+// ===== RESET / NEW VIDEO =====
+function resetVideo(){
+  // Revoke blob URL
+  if(V.src&&V.src.startsWith('blob:'))URL.revokeObjectURL(V.src);
+  V.pause();V.removeAttribute('src');V.load();
+
+  // Clear all data
+  flowData=[];motionData=[];dStrokes=[];cStroke=[];
+  scanning=false;scanned=false;videoReady=false;playing=false;
+  detectedStroke='unknown';
+  beepTime=-1;blockDepartTime=-1;wallTouches=[];
+  poolLeftX=-1;poolRightX=-1;markingWall=null;
+  laneY=-1;selectingLane=false;
+
+  // Reset UI
+  document.getElementById('player-area').style.display='none';
+  document.getElementById('upload-zone').style.display='flex';
+  document.getElementById('file-input').value='';
+  document.getElementById('analysis-box').style.display='none';
+  document.getElementById('motion-box').style.display='none';
+  document.getElementById('timing-box').style.display='none';
+  document.getElementById('xa-tog').style.display='none';
+  document.getElementById('cur-speed').style.display='none';
+  document.getElementById('stroke-badge').style.display='none';
+  document.getElementById('time-display').textContent='--:--.--';
+  document.getElementById('fn').textContent='--';
+  document.getElementById('peak-info').textContent='';
+  document.getElementById('scan-st').textContent='';
+  document.getElementById('g-hover').textContent='';
+  document.getElementById('mark-left-val').textContent='--';
+  document.getElementById('mark-right-val').textContent='--';
+  document.getElementById('mark-left-btn').textContent='◀ Tap Left Wall';
+  document.getElementById('mark-right-btn').textContent='Tap Right Wall ▶';
+  document.getElementById('lane-val').textContent='All (no filter)';
+  document.getElementById('lane-clear-btn').style.display='none';
+  document.getElementById('lane-btn').textContent='👆 Tap Swimmer on Video';
+  document.getElementById('lane-btn').style.color='';
+  document.getElementById('scan-btn').className='scan-btn';
+  document.getElementById('scan-btn').textContent='🔍 Scan Video';
+  document.getElementById('scan-btn').disabled=false;
+  showSt('','');
+  clearDraw();
+  drawGraph();
+}
+
+// ===== BEEP DETECTION via Web Audio API =====
+async function detectBeep(){
+  if(!V.src)return null;
+  try{
+    // Fetch the video blob and decode audio
+    const resp=await fetch(V.src);
+    const buf=await resp.arrayBuffer();
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    const audioBuf=await ac.decodeAudioData(buf);
+    ac.close();
+
+    const sr=audioBuf.sampleRate;
+    const ch=audioBuf.getChannelData(0);
+
+    // Analyze in short windows for high-frequency energy spike
+    // Starting beep is typically a 1-4kHz tone, 0.5-2 seconds long
+    const winSize=Math.floor(sr*0.05); // 50ms windows
+    const hopSize=Math.floor(sr*0.025); // 25ms hop
+    const energies=[];
+
+    for(let start=0;start+winSize<=ch.length;start+=hopSize){
+      // High-pass energy: approximate by computing differences (emphasizes high freq)
+      let hfEnergy=0,totalEnergy=0;
+      for(let i=start+1;i<start+winSize;i++){
+        const diff=ch[i]-ch[i-1]; // simple high-pass
+        hfEnergy+=diff*diff;
+        totalEnergy+=ch[i]*ch[i];
+      }
+      // Ratio of high-freq to total gives us tonal content
+      const ratio=totalEnergy>0?hfEnergy/totalEnergy:0;
+      energies.push({time:start/sr,hfEnergy:hfEnergy/winSize,total:totalEnergy/winSize,ratio:ratio});
+    }
+
+    if(energies.length<10)return null;
+
+    // Find the first significant high-frequency energy spike
+    // The beep should be louder than background and have high HF ratio
+    const sorted=energies.map(function(e){return e.hfEnergy}).sort(function(a,b){return a-b});
+    const medianHF=sorted[Math.floor(sorted.length*0.5)];
+    const p90HF=sorted[Math.floor(sorted.length*0.9)];
+    const threshold=Math.max(medianHF*5,p90HF*0.5);
+
+    // Look for sustained spike (beep lasts at least 100ms = 4 consecutive windows)
+    let beepStart=-1;
+    let runLen=0;
+    for(let i=0;i<energies.length;i++){
+      if(energies[i].hfEnergy>threshold&&energies[i].total>medianHF*2){
+        runLen++;
+        if(runLen>=4&&beepStart<0){
+          beepStart=i-3; // start of the run
+        }
+      } else {
+        if(beepStart>=0)break; // found it
+        runLen=0;
+      }
+    }
+
+    if(beepStart>=0){
+      return energies[beepStart].time;
+    }
+    return null;
+  }catch(e){
+    console.warn('Beep detection failed:',e);
+    return null;
+  }
+}
+
+// ===== WALL TURN DETECTION from position data =====
+function detectWallTurns(rawDisplacements,sampleFps){
+  if(camMode!=='fixed'||rawDisplacements.length<20)return [];
+
+  // Smooth positions heavily for wall detection
+  const posArr=rawDisplacements.map(function(d){return d.posX});
+  const smoothR=6;
+  const smoothPos=posArr.map(function(_,i){
+    const lo=Math.max(0,i-smoothR),hi=Math.min(posArr.length-1,i+smoothR);
+    const w=[];for(let j=lo;j<=hi;j++)w.push(posArr[j]);
+    w.sort(function(a,b){return a-b});
+    if(w.length>4){w.shift();w.pop()}
+    return w.reduce(function(a,b){return a+b},0)/w.length;
+  });
+
+  // Find direction reversals: swimmer reaches wall and turns
+  // Compute velocity sign changes
+  const vel=[];
+  for(let i=1;i<smoothPos.length;i++){
+    vel.push(smoothPos[i]-smoothPos[i-1]);
+  }
+
+  // Smooth velocity
+  const sVel=vel.map(function(_,i){
+    const lo=Math.max(0,i-3),hi=Math.min(vel.length-1,i+3);
+    let s=0,c=0;for(let j=lo;j<=hi;j++){s+=vel[j];c++}
+    return s/c;
+  });
+
+  // Find zero-crossings of velocity (direction changes)
+  const turns=[];
+  const minGap=sampleFps*1.5; // at least 1.5 seconds between turns
+  let lastTurnI=-minGap*2;
+
+  for(let i=1;i<sVel.length;i++){
+    if(sVel[i]*sVel[i-1]<0 && (i-lastTurnI)>minGap){
+      // Velocity sign changed — swimmer reversed direction
+      // Check that there was meaningful displacement since last turn
+      const rangeStart=Math.max(0,lastTurnI);
+      let displacement=0;
+      for(let j=rangeStart+1;j<=i;j++){
+        displacement+=Math.abs(smoothPos[j]-smoothPos[j-1]);
+      }
+      if(displacement>0.05){ // at least 5% of frame width traveled
+        turns.push({
+          time:rawDisplacements[i].time,
+          posX:smoothPos[i],
+          index:i
+        });
+        lastTurnI=i;
+      }
+    }
+  }
+
+  return turns;
+}
+
+// ===== BLOCK DEPARTURE DETECTION =====
+function detectBlockDeparture(motionData,beepT){
+  if(beepT<0||motionData.length<5)return -1;
+
+  // Find first significant motion spike after beep
+  // The dive/start produces a burst of motion energy
+  const mean=motionData.reduce(function(s,m){return s+m.energy},0)/motionData.length;
+  const threshold=mean*2.0;
+
+  let runLen=0;
+  for(let i=0;i<motionData.length;i++){
+    if(motionData[i].time<beepT)continue; // skip before beep
+    if(motionData[i].energy>threshold){
+      runLen++;
+      if(runLen>=2){ // sustained motion for 2+ frames = real movement
+        return motionData[i-1].time; // return start of motion
+      }
+    } else {
+      runLen=0;
+    }
+  }
+  return -1;
+}
+
+// ===== WALL-TO-WALL SPEED CALIBRATION =====
+function calibrateSpeedFromWalls(flowData,wallTouches,beepT,blockT,dt){
+  // Build lap segments from timing events
+  // First segment: blockDeparture (or beep) → first wall touch
+  // Subsequent: wall → wall
+  const segments=[];
+  const startTime=blockT>0?blockT:(beepT>0?beepT:(flowData.length>0?flowData[0].time:0));
+
+  const times=[startTime];
+  wallTouches.forEach(function(w){times.push(w.time)});
+  // Add end of video if we don't have enough wall touches
+  if(flowData.length>0)times.push(flowData[flowData.length-1].time);
+
+  const lapDist=getLapLen();
+  const useMetric=getLapUnit()==='m';
+
+  for(let i=0;i<Math.min(times.length-1,numLaps);i++){
+    const t0=times[i],t1=times[i+1];
+    const lapTime=t1-t0;
+    if(lapTime>0.5){ // sanity check
+      const lapSpeed=lapDist/lapTime; // units/s
+      segments.push({t0:t0,t1:t1,lapSpeed:lapSpeed,lapTime:lapTime});
+    }
+  }
+
+  if(segments.length===0)return flowData;
+
+  // For each segment, redistribute the constant lap speed using the
+  // relative motion profile from the optical scan
+  const calibrated=[];
+  for(let i=0;i<flowData.length;i++){
+    const t=flowData[i].time;
+    // Find which segment this frame belongs to
+    let seg=null;
+    for(let s=0;s<segments.length;s++){
+      if(t>=segments[s].t0&&t<segments[s].t1){seg=segments[s];break}
+    }
+    if(!seg){
+      // Outside measured segments — keep original but scale
+      calibrated.push({time:t,speed:flowData[i].speed,distance:flowData[i].distance});
+      continue;
+    }
+
+    // Get total optical-flow "energy" in this segment
+    let segTotal=0,segFrames=[];
+    for(let j=0;j<flowData.length;j++){
+      if(flowData[j].time>=seg.t0&&flowData[j].time<seg.t1){
+        segTotal+=flowData[j].speed;
+        segFrames.push(j);
+      }
+    }
+
+    if(segTotal>0){
+      // Scale: optical_speed * (lapSpeed * numFrames / totalOpticalSpeed)
+      const scale=seg.lapSpeed*segFrames.length/segTotal;
+      calibrated.push({time:t,speed:flowData[i].speed*scale,distance:0});
+    } else {
+      calibrated.push({time:t,speed:seg.lapSpeed,distance:0});
+    }
+  }
+
+  // Recompute cumulative distance
+  let cumDist=0;
+  for(let i=0;i<calibrated.length;i++){
+    if(i>0)cumDist+=calibrated[i].speed*dt;
+    calibrated[i].distance=cumDist;
+  }
+
+  return calibrated;
+}
+
+// ===== SHOW TIMING EVENTS =====
+function showTimingEvents(){
+  const box=document.getElementById('timing-box');
+  box.style.display='block';
+
+  document.getElementById('tv-beep').textContent=beepTime>=0?fmT(beepTime):'not found';
+  document.getElementById('tv-block').textContent=blockDepartTime>=0?fmT(blockDepartTime):'not found';
+
+  if(beepTime>=0&&blockDepartTime>=0){
+    const react=((blockDepartTime-beepTime)*1000).toFixed(0);
+    document.getElementById('tv-react').innerHTML=react+'<small>ms</small>';
+  } else {
+    document.getElementById('tv-react').textContent='--';
+  }
+
+  // Wall touches
+  if(wallTouches.length>0){
+    document.getElementById('wall-times-box').style.display='block';
+    const row=document.getElementById('wall-times-row');
+    row.innerHTML='';
+    wallTouches.forEach(function(w,i){
+      const el=document.createElement('div');
+      el.className='wt-item';
+      el.innerHTML='Wall '+(i+1)+': '+fmT(w.time);
+      el.onclick=function(){V.currentTime=w.time;V.pause();updateHUD();drawGraph();drawMotionGraph()};
+      row.appendChild(el);
+    });
+
+    // Lap splits
+    const startTime=blockDepartTime>0?blockDepartTime:(beepTime>0?beepTime:0);
+    const splitTimes=[startTime].concat(wallTouches.map(function(w){return w.time}));
+    if(splitTimes.length>1){
+      document.getElementById('lap-splits-box').style.display='block';
+      const srow=document.getElementById('lap-splits-row');
+      srow.innerHTML='';
+      for(let i=1;i<splitTimes.length;i++){
+        const lapTime=splitTimes[i]-splitTimes[i-1];
+        const lapSpeed=(getLapLen()/lapTime).toFixed(2);
+        const el=document.createElement('div');
+        el.className='wt-item';
+        el.style.background='rgba(118,255,3,.05)';el.style.color='#76ff03';
+        el.innerHTML='Lap '+i+': '+lapTime.toFixed(2)+'s <small>'+lapSpeed+' '+speedUnit+'</small>';
+        srow.appendChild(el);
+      }
+    }
+  }
+}
+
+updateSetup();
+</script>
+</body>
+</html>
