@@ -1446,7 +1446,6 @@ function detectWallTurns(rawDisplacements,sampleFps){
   });
 
   // Find direction reversals: swimmer reaches wall and turns
-  // Compute velocity sign changes
   const vel=[];
   for(let i=1;i<smoothPos.length;i++){
     vel.push(smoothPos[i]-smoothPos[i-1]);
@@ -1460,21 +1459,19 @@ function detectWallTurns(rawDisplacements,sampleFps){
   });
 
   // Find zero-crossings of velocity (direction changes)
-  const turns=[];
+  const rawTurns=[];
   const minGap=sampleFps*1.5; // at least 1.5 seconds between turns
   let lastTurnI=-minGap*2;
 
   for(let i=1;i<sVel.length;i++){
     if(sVel[i]*sVel[i-1]<0 && (i-lastTurnI)>minGap){
-      // Velocity sign changed — swimmer reversed direction
-      // Check that there was meaningful displacement since last turn
       const rangeStart=Math.max(0,lastTurnI);
       let displacement=0;
       for(let j=rangeStart+1;j<=i;j++){
         displacement+=Math.abs(smoothPos[j]-smoothPos[j-1]);
       }
-      if(displacement>0.05){ // at least 5% of frame width traveled
-        turns.push({
+      if(displacement>0.05){
+        rawTurns.push({
           time:rawDisplacements[i].time,
           posX:smoothPos[i],
           index:i
@@ -1482,6 +1479,50 @@ function detectWallTurns(rawDisplacements,sampleFps){
         lastTurnI=i;
       }
     }
+  }
+
+  if(rawTurns.length===0)return [];
+
+  // Classify each turn: which wall is it?
+  // Determine start wall from swimmer's initial position (block departure side)
+  // The swimmer's first frames give the start wall x-position
+  const startPosX=smoothPos[Math.min(5,smoothPos.length-1)];
+
+  // Find the two extremes of swimmer position — these are the two walls
+  const allPosX=rawTurns.map(function(t){return t.posX});
+  const minX=Math.min.apply(null,allPosX);
+  const maxX=Math.max.apply(null,allPosX);
+
+  // Start wall is whichever extreme the swimmer began near
+  const startIsLeft=Math.abs(startPosX-minX)<Math.abs(startPosX-maxX);
+
+  // Use pool edge markers if available, otherwise use detected extremes
+  const leftWallX=poolLeftX>=0?poolLeftX:minX;
+  const rightWallX=poolRightX>=0?poolRightX:maxX;
+  const midX=(leftWallX+rightWallX)/2;
+
+  // Label each turn
+  const turns=rawTurns.map(function(t){
+    const isLeftWall=t.posX<midX;
+    const isStartWall=startIsLeft?isLeftWall:!isLeftWall;
+    return{
+      time:t.time,
+      posX:t.posX,
+      index:t.index,
+      wall:isStartWall?'start':'far',
+      label:isStartWall?'Start Wall':'Far Wall'
+    };
+  });
+
+  // Trim turns to expected number of laps
+  // numLaps laps means (numLaps-1) turns mid-race, plus the finish touch
+  // But we detect direction changes, which happen at EVERY wall
+  // For a 200 SCY (8 laps): start→far(1)→start(2)→far(3)→...→start(finish)
+  //   = 7 direction changes total (turns 1-7), last one at start wall = finish
+  const expectedTurns=numLaps-1; // direction changes including finish
+  if(turns.length>expectedTurns+2){
+    // Too many detected — keep only the first expectedTurns
+    turns.length=expectedTurns;
   }
 
   return turns;
@@ -1605,7 +1646,8 @@ function showTimingEvents(){
     wallTouches.forEach(function(w,i){
       const el=document.createElement('div');
       el.className='wt-item';
-      el.innerHTML='Wall '+(i+1)+': '+fmT(w.time);
+      const wallLabel=w.label||('Wall '+(i+1));
+      el.innerHTML=wallLabel+' <small>#'+(i+1)+'</small>: '+fmT(w.time);
       el.onclick=function(){V.currentTime=w.time;V.pause();updateHUD();drawGraph();drawMotionGraph()};
       row.appendChild(el);
     });
