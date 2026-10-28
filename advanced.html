@@ -146,7 +146,7 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
         <span class="setup-label">Camera</span>
         <div class="u-toggle" id="cam-toggle">
           <button id="cam-fixed" class="on" onclick="setCamMode('fixed')">Side View</button>
-          <button id="cam-endon" onclick="setCamMode('endon')">End-on / Behind Blocks</button>
+          <button id="cam-endon" onclick="setCamMode('endon')">Across Pool</button>
           <button id="cam-follow" onclick="setCamMode('follow')">Walking with Swimmer</button>
         </div>
       </div>
@@ -953,7 +953,7 @@ async function scanVideo(){
   scanning=false;scanned=true;
   btn.className='scan-btn';btn.textContent='🔍 Rescan';btn.disabled=false;
   progress.style.width='0%';
-  document.getElementById('scan-st').textContent='Done · '+(camMode==='fixed'?'Side view':camMode==='endon'?'End-on':'Following')+' mode';
+  document.getElementById('scan-st').textContent='Done · '+(camMode==='fixed'?'Side view':camMode==='endon'?'Across pool':'Following')+' mode';
   document.getElementById('xa-tog').style.display='flex';
   document.getElementById('motion-box').style.display=strokeDetectOn?'block':'none';
 
