@@ -201,12 +201,12 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
         <span class="setup-unit" id="lap-dist"></span>
       </div>
       <div class="setup-row" id="pool-mark-row" style="display:flex">
-        <span class="setup-label">Pool Edges</span>
-        <button class="btn btn-sm" id="mark-left-btn" onclick="startMark('left')" style="font-size:10px">◀ Tap Left Wall</button>
-        <span id="mark-left-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
-        <button class="btn btn-sm" id="mark-right-btn" onclick="startMark('right')" style="font-size:10px">Tap Right Wall ▶</button>
-        <span id="mark-right-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
-        <span class="setup-unit" style="color:#3a5a6a">← tap walls on video</span>
+        <span class="setup-label">Walls</span>
+        <button class="btn btn-sm" id="mark-start-btn" onclick="startMark('start')" style="font-size:10px">🏁 Tap Start Wall</button>
+        <span id="mark-start-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
+        <button class="btn btn-sm" id="mark-far-btn" onclick="startMark('far')" style="font-size:10px">Tap Far Wall ↔</button>
+        <span id="mark-far-val" style="font-size:10px;color:#76ff03;min-width:40px">--</span>
+        <span class="setup-unit" style="color:#3a5a6a">← blocks = start wall</span>
       </div>
       <div class="setup-row">
         <span class="setup-label">Height</span>
@@ -372,7 +372,7 @@ let evtDist=50,evtStroke='free',evtType='ind'; // event picker
 let numLaps=2; // computed from event + course
 let detectedStroke='unknown',speedUnit='yd/s';
 let camMode='fixed'; // 'fixed' or 'follow'
-let poolLeftX=-1,poolRightX=-1,markingWall=null; // for fixed camera pool edge calibration
+let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
 let beepTime=-1,blockDepartTime=-1,wallTouches=[]; // timing events
 let laneY=-1,laneH=0.20; // lane region: center Y (0-1) and half-height (fraction of frame)
 let selectingLane=false;
@@ -431,21 +431,21 @@ function getStrokeLabel(s){
 function startMark(side){
   markingWall=side;
   V.pause();
-  const btn=document.getElementById(side==='left'?'mark-left-btn':'mark-right-btn');
+  const btn=document.getElementById(side==='start'?'mark-start-btn':'mark-far-btn');
   btn.textContent='👆 Tap on video...';btn.style.color='#ffd740';
 }
 function handlePoolMark(e){
   if(!markingWall)return;
   const rect=V.getBoundingClientRect();
   const xPct=(e.clientX-rect.left)/rect.width; // 0-1
-  if(markingWall==='left'){
-    poolLeftX=xPct;
-    document.getElementById('mark-left-val').textContent=Math.round(xPct*100)+'%';
-    document.getElementById('mark-left-btn').textContent='◀ Left Wall';document.getElementById('mark-left-btn').style.color='';
+  if(markingWall==='start'){
+    poolStartX=xPct;
+    document.getElementById('mark-start-val').textContent=Math.round(xPct*100)+'%';
+    document.getElementById('mark-start-btn').textContent='🏁 Start Wall';document.getElementById('mark-start-btn').style.color='';
   } else {
-    poolRightX=xPct;
-    document.getElementById('mark-right-val').textContent=Math.round(xPct*100)+'%';
-    document.getElementById('mark-right-btn').textContent='Right Wall ▶';document.getElementById('mark-right-btn').style.color='';
+    poolFarX=xPct;
+    document.getElementById('mark-far-val').textContent=Math.round(xPct*100)+'%';
+    document.getElementById('mark-far-btn').textContent='Far Wall ✓';document.getElementById('mark-far-btn').style.color='';
   }
   markingWall=null;
   updateSetup();
@@ -764,8 +764,8 @@ async function scanVideo(){
 
     // Step 2: Calibrate — map normalized displacement to real distance
     let normPerUnit;
-    if(poolLeftX>=0&&poolRightX>poolLeftX){
-      const poolSpan=poolRightX-poolLeftX;
+    if(poolStartX>=0&&poolFarX>=0){
+      const poolSpan=Math.abs(poolFarX-poolStartX);
       const lapDist=getLapLen(); // in course units
       normPerUnit=poolSpan/lapDist;
     } else {
@@ -1309,7 +1309,7 @@ function resetVideo(){
   scanning=false;scanned=false;videoReady=false;playing=false;
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
-  poolLeftX=-1;poolRightX=-1;markingWall=null;
+  poolStartX=-1;poolFarX=-1;markingWall=null;
   laneY=-1;selectingLane=false;
 
   // Reset UI
@@ -1327,10 +1327,10 @@ function resetVideo(){
   document.getElementById('peak-info').textContent='';
   document.getElementById('scan-st').textContent='';
   document.getElementById('g-hover').textContent='';
-  document.getElementById('mark-left-val').textContent='--';
-  document.getElementById('mark-right-val').textContent='--';
-  document.getElementById('mark-left-btn').textContent='◀ Tap Left Wall';
-  document.getElementById('mark-right-btn').textContent='Tap Right Wall ▶';
+  document.getElementById('mark-start-val').textContent='--';
+  document.getElementById('mark-far-val').textContent='--';
+  document.getElementById('mark-start-btn').textContent='🏁 Tap Start Wall';
+  document.getElementById('mark-far-btn').textContent='Tap Far Wall ↔';
   document.getElementById('lane-val').textContent='All (no filter)';
   document.getElementById('lane-clear-btn').style.display='none';
   document.getElementById('lane-btn').textContent='👆 Tap Swimmer on Video';
@@ -1497,9 +1497,9 @@ function detectWallTurns(rawDisplacements,sampleFps){
   const startIsLeft=Math.abs(startPosX-minX)<Math.abs(startPosX-maxX);
 
   // Use pool edge markers if available, otherwise use detected extremes
-  const leftWallX=poolLeftX>=0?poolLeftX:minX;
-  const rightWallX=poolRightX>=0?poolRightX:maxX;
-  const midX=(leftWallX+rightWallX)/2;
+  const startWallX=poolStartX>=0?poolStartX:(startIsLeft?minX:maxX);
+  const farWallX=poolFarX>=0?poolFarX:(startIsLeft?maxX:minX);
+  const midX=(startWallX+farWallX)/2;
 
   // Label each turn
   const turns=rawTurns.map(function(t){
