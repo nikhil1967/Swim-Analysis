@@ -1098,17 +1098,51 @@ async function scanVideo(){
             yStart=Math.max(0,Math.floor((laneY-laneH)*sh));
             yEnd=Math.min(sh,Math.floor((laneY+laneH)*sh));
           }
+
+          // For endon mode: compute lane center X at each Y for proximity weighting
+          // This prevents the tracker from drifting to adjacent lanes
+          const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*sh:-1;
+
           for(let y=yStart;y<yEnd;y+=step){
             let xStart=0,xEnd=sw;
+            let laneCenterX=-1; // center of lane at this Y, for proximity weighting
             if(usePerspective){
               const bounds=getLaneBoundsAtY(y/sh);
-              if(bounds){xStart=Math.max(0,Math.floor(bounds.xLeft*sw));xEnd=Math.min(sw,Math.floor(bounds.xRight*sw))}
+              if(bounds){
+                xStart=Math.max(0,Math.floor(bounds.xLeft*sw));
+                xEnd=Math.min(sw,Math.floor(bounds.xRight*sw));
+                laneCenterX=(xStart+xEnd)/2;
+                // Tighten lane bounds by 10% on each side to avoid rope splash
+                const laneW2=xEnd-xStart;
+                xStart=Math.floor(xStart+laneW2*0.1);
+                xEnd=Math.floor(xEnd-laneW2*0.1);
+              }
             } else if(camMode==='endon'&&laneX>=0){
               xStart=Math.max(0,Math.floor((laneX-laneW)*sw));
               xEnd=Math.min(sw,Math.floor((laneX+laneW)*sw));
+              laneCenterX=(xStart+xEnd)/2;
             }
             for(let x=xStart;x<xEnd;x+=step){
               const idx=(y*sw+x)*4;
+
+              // Proximity weight: pixels closer to lane center X get higher weight
+              // This keeps the tracker centered in the lane, preventing drift to adjacent lanes
+              let proximityW=1;
+              if(camMode==='endon'&&laneCenterX>=0){
+                const dxFromCenter=Math.abs(x-laneCenterX);
+                const halfLane=(xEnd-xStart)/2;
+                if(halfLane>0) proximityW=Math.max(0.1,1-0.7*(dxFromCenter/halfLane));
+              }
+              // Temporal continuity: weight pixels near the previous Y position more heavily
+              let continuityW=1;
+              if(camMode==='endon'&&prevPosY>=0){
+                const dyFromPrev=Math.abs(y-prevPosY);
+                // Allow ±15% of frame height movement per frame (generous for fast swimming)
+                const maxDy=sh*0.15;
+                if(dyFromPrev>maxDy) continuityW=0.1; // strongly penalize large jumps
+                else continuityW=1-0.5*(dyFromPrev/maxDy);
+              }
+
               if(useColor){
                 // Color matching: check if pixel matches swimmer's cap color in HSV space
                 const hsv=rgbToHsv(frameData[idx],frameData[idx+1],frameData[idx+2]);
@@ -1121,7 +1155,7 @@ async function scanVideo(){
                   const diff=Math.abs(frameData[idx]-prevFrame[idx])
                             +Math.abs(frameData[idx+1]-prevFrame[idx+1])
                             +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
-                  const weight=diff>15?2:1; // moving color pixels weighted higher
+                  const weight=(diff>15?2:1)*proximityW*continuityW;
                   colorWX+=x*weight;colorWY+=y*weight;colorTotal+=weight;
                 }
               }
@@ -1129,13 +1163,21 @@ async function scanVideo(){
               const diff=Math.abs(frameData[idx]-prevFrame[idx])
                         +Math.abs(frameData[idx+1]-prevFrame[idx+1])
                         +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
-              if(diff>40){motionWX+=x*diff;motionWY+=y*diff;motionTotal+=diff}
+              if(diff>40){
+                const w=diff*proximityW*continuityW;
+                motionWX+=x*w;motionWY+=y*w;motionTotal+=w;
+              }
             }
           }
           // Use color centroid if enough matching pixels found, otherwise fall back to motion
           const useColorResult=(useColor && colorTotal>10);
           if(camMode==='endon'){
-            const swimmerY=useColorResult?(colorWY/colorTotal):(motionTotal>0?motionWY/motionTotal:sh/2);
+            let swimmerY=useColorResult?(colorWY/colorTotal):(motionTotal>0?motionWY/motionTotal:sh/2);
+            // Temporal smoothing: blend with previous position (EMA α=0.4)
+            if(prevPosY>=0){
+              const alpha=0.4;
+              swimmerY=alpha*swimmerY+(1-alpha)*prevPosY;
+            }
             rawDisplacements.push({time:t,posX:swimmerY/sh});
           } else {
             const swimmerX=useColorResult?(colorWX/colorTotal):(motionTotal>0?motionWX/motionTotal:sw/2);
