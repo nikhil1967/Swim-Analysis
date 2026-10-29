@@ -387,6 +387,11 @@ let ropeRight=null; // {x1,y1,x2,y2} — right rope line (sorted by y)
 let waterYmin=0,waterYmax=1; // Y range (0-1) of visible water surface, from tap points
 let strokeDetectOn=true;
 
+// Swimmer color tracking: sample cap/suit color, track through race
+let swimmerColor=null; // {hues:[], sats:[], vals:[], rgb:{r,g,b}} — color signature
+let selectingSwimmer=false; // true when waiting for cap tap
+let vanishPt=null; // {x,y} — perspective vanishing point from rope line intersection
+
 // Course definitions: pool length per lap (wall to wall)
 const COURSES={SCY:{len:25,unit:'yd',label:'SCY 25yd'},LCM:{len:50,unit:'m',label:'LCM 50m'},SCM:{len:25,unit:'m',label:'SCM 25m'}};
 function getLapLen(){return COURSES[course].len}
@@ -516,12 +521,115 @@ function startLaneSelect(){
   }
   document.getElementById('lane-btn').style.color='#ffd740';
 }
+// RGB→HSV helper
+function rgbToHsv(r,g,b){
+  r/=255;g/=255;b/=255;
+  const mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn;
+  let h=0;
+  if(d>0){
+    if(mx===r) h=((g-b)/d+6)%6;
+    else if(mx===g) h=(b-r)/d+2;
+    else h=(r-g)/d+4;
+    h*=60;
+  }
+  return{h:h,s:mx>0?d/mx:0,v:mx};
+}
+
+// Compute vanishing point from two lane rope lines
+function computeVanishPoint(){
+  if(!ropeLeft||!ropeRight){vanishPt=null;return}
+  // Line 1: ropeLeft (x1,y1)→(x2,y2), Line 2: ropeRight
+  const x1=ropeLeft.x1,y1=ropeLeft.y1,x2=ropeLeft.x2,y2=ropeLeft.y2;
+  const x3=ropeRight.x1,y3=ropeRight.y1,x4=ropeRight.x2,y4=ropeRight.y2;
+  const denom=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4);
+  if(Math.abs(denom)<0.00001){vanishPt=null;return} // parallel lines
+  const t=((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/denom;
+  vanishPt={x:x1+t*(x2-x1), y:y1+t*(y2-y1)};
+  console.log('Vanishing point:',vanishPt.x.toFixed(3),vanishPt.y.toFixed(3));
+}
+
+// Sample swimmer color from a patch around the tap point
+function sampleSwimmerColor(normX,normY){
+  // Draw current frame to canvas and sample a patch
+  const sc=document.createElement('canvas');
+  const vw=V.videoWidth,vh=V.videoHeight;
+  sc.width=vw;sc.height=vh;
+  const sctx=sc.getContext('2d');
+  sctx.drawImage(V,0,0,vw,vh);
+
+  // Sample a 20x20 pixel patch centered on the tap
+  const patchR=10;
+  const cx=Math.round(normX*vw),cy=Math.round(normY*vh);
+  const x0=Math.max(0,cx-patchR),y0=Math.max(0,cy-patchR);
+  const x1=Math.min(vw,cx+patchR),y1=Math.min(vh,cy+patchR);
+  const data=sctx.getImageData(x0,y0,x1-x0,y1-y0).data;
+
+  // Build color histogram in HSV space
+  const hues=[],sats=[],vals=[];
+  let rSum=0,gSum=0,bSum=0,count=0;
+  for(let i=0;i<data.length;i+=4){
+    const r=data[i],g=data[i+1],b=data[i+2];
+    const hsv=rgbToHsv(r,g,b);
+    hues.push(hsv.h);sats.push(hsv.s);vals.push(hsv.v);
+    rSum+=r;gSum+=g;bSum+=b;count++;
+  }
+  if(count===0)return null;
+
+  // Compute median hue (handling circular wrap), and ranges
+  hues.sort(function(a,b){return a-b});
+  sats.sort(function(a,b){return a-b});
+  vals.sort(function(a,b){return a-b});
+  const medH=hues[Math.floor(hues.length/2)];
+  const medS=sats[Math.floor(sats.length/2)];
+  const medV=vals[Math.floor(vals.length/2)];
+  // Range: use IQR with generous margin for water color shifts
+  const hIqr=hues[Math.floor(hues.length*0.75)]-hues[Math.floor(hues.length*0.25)];
+  const sIqr=sats[Math.floor(sats.length*0.75)]-sats[Math.floor(sats.length*0.25)];
+  const vIqr=vals[Math.floor(vals.length*0.75)]-vals[Math.floor(vals.length*0.25)];
+
+  swimmerColor={
+    medH:medH, medS:medS, medV:medV,
+    hRange:Math.max(hIqr*2,25), // min ±25° hue tolerance
+    sRange:Math.max(sIqr*2,0.15),
+    vRange:Math.max(vIqr*2,0.2),
+    rgb:{r:Math.round(rSum/count),g:Math.round(gSum/count),b:Math.round(bSum/count)}
+  };
+  console.log('Swimmer color sampled: H='+medH.toFixed(0)+'° S='+medS.toFixed(2)+' V='+medV.toFixed(2)+
+    ' RGB=('+swimmerColor.rgb.r+','+swimmerColor.rgb.g+','+swimmerColor.rgb.b+')'+
+    ' hRange=±'+swimmerColor.hRange.toFixed(0)+'° sRange=±'+swimmerColor.sRange.toFixed(2));
+  return swimmerColor;
+}
+
 function handleLaneSelect(e){
-  if(!selectingLane)return;
+  if(!selectingLane&&!selectingSwimmer)return;
   const coords=clickToVideoFrac(e);
+
+  // Handle swimmer cap tap (after lane is defined)
+  if(selectingSwimmer){
+    const color=sampleSwimmerColor(coords.x,coords.y);
+    selectingSwimmer=false;
+    if(color){
+      document.getElementById('lane-val').textContent='Lane ✓ Swimmer ✓';
+      // Show color swatch
+      document.getElementById('lane-btn').innerHTML='<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:rgb('+
+        color.rgb.r+','+color.rgb.g+','+color.rgb.b+');vertical-align:middle;margin-right:4px;border:1px solid #fff"></span>Tracking '+
+        (color.medS<0.15?'(light/white)':color.medH<30||color.medH>330?'(red cap)':
+         color.medH<70?'(yellow/gold)':color.medH<160?'(green)':
+         color.medH<250?'(blue)':color.medH<290?'(purple)':'(pink)')+' cap';
+    } else {
+      document.getElementById('lane-val').textContent='Lane (perspective)';
+      document.getElementById('lane-btn').textContent='👆 Tap Lane Ropes';
+    }
+    document.getElementById('lane-btn').style.color='';
+    document.getElementById('lane-clear-btn').style.display='inline-flex';
+    drawLaneOverlay();
+    return;
+  }
+
+  if(!selectingLane)return;
+
   if(camMode==='endon'){
-    // Across-pool camera: 4 taps to define lane trapezoid
-    // Tap any 2 points on left rope, then any 2 points on right rope
+    // Across-pool camera: 4 taps for lane ropes + 1 for swimmer cap
     ropeTaps.push({x:coords.x, y:coords.y});
     laneTapCount=ropeTaps.length;
     const prompts=[
@@ -531,31 +639,36 @@ function handleLaneSelect(e){
     ];
     if(laneTapCount<4){
       document.getElementById('lane-btn').textContent=prompts[laneTapCount-1];
-      drawLaneOverlay(); // show progress markers
-      return; // wait for more taps
+      drawLaneOverlay();
+      return;
     }
-    // All 4 taps collected — build rope lines
-    // Sort each pair by Y so y1 < y2 (top to bottom)
+    // All 4 rope taps collected — build rope lines
     const lA=ropeTaps[0],lB=ropeTaps[1];
     if(lA.y<=lB.y) ropeLeft={x1:lA.x,y1:lA.y,x2:lB.x,y2:lB.y};
     else ropeLeft={x1:lB.x,y1:lB.y,x2:lA.x,y2:lA.y};
     const rA=ropeTaps[2],rB=ropeTaps[3];
     if(rA.y<=rB.y) ropeRight={x1:rA.x,y1:rA.y,x2:rB.x,y2:rB.y};
     else ropeRight={x1:rB.x,y1:rB.y,x2:rA.x,y2:rA.y};
-    // Water surface Y bounds: the tapped points define where the pool is visible.
-    // Use the range of all 4 tap Y values, with a small margin to capture full lane width.
+    // Water surface Y bounds
     const allTapYs=ropeTaps.map(function(p){return p.y});
     const tapYmin=Math.min.apply(null,allTapYs);
     const tapYmax=Math.max.apply(null,allTapYs);
-    const yMargin=(tapYmax-tapYmin)*0.1; // 10% margin
+    const yMargin=(tapYmax-tapYmin)*0.1;
     waterYmin=Math.max(0,tapYmin-yMargin);
     waterYmax=Math.min(1,tapYmax+yMargin);
-    // Also set laneX as midpoint for compatibility with code that checks laneX>=0
     const midY=(waterYmin+waterYmax)/2;
     const midBounds=getLaneBoundsAtY(midY);
     if(midBounds){laneX=(midBounds.xLeft+midBounds.xRight)/2;laneW=(midBounds.xRight-midBounds.xLeft)/2}
     laneY=-1;
+    // Compute perspective vanishing point from rope lines
+    computeVanishPoint();
+    // Now prompt for swimmer cap tap
+    selectingLane=false;
+    selectingSwimmer=true;
+    document.getElementById('lane-btn').textContent='🎯 Now tap your swimmer\'s CAP...';
     document.getElementById('lane-val').textContent='Lane (perspective)';
+    drawLaneOverlay();
+    return;
   } else {
     // Side view: single tap horizontal band (Y position)
     const yPct=coords.y;
@@ -571,8 +684,9 @@ function handleLaneSelect(e){
   drawLaneOverlay();
 }
 function clearLane(){
-  laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;
+  laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;selectingSwimmer=false;
   ropeTaps=[];ropeLeft=null;ropeRight=null;
+  swimmerColor=null;vanishPt=null;
   document.getElementById('lane-val').textContent='All (no filter)';
   document.getElementById('lane-clear-btn').style.display='none';
   document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Lane Ropes':'👆 Tap Swimmer on Video';
@@ -663,6 +777,25 @@ function drawLaneOverlay(){
       lx.setLineDash([]);
       lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
       lx.fillText('SELECTED LANE',(tl+tr)/2-40,topPx+14);
+      // Show vanishing point if computed
+      if(vanishPt){
+        const vpx=vr.x+vanishPt.x*vr.w, vpy=vr.y+vanishPt.y*vr.h;
+        lx.strokeStyle='rgba(255,152,0,0.7)';lx.lineWidth=1;lx.setLineDash([2,2]);
+        lx.beginPath();lx.moveTo(vpx-8,vpy);lx.lineTo(vpx+8,vpy);lx.stroke();
+        lx.beginPath();lx.moveTo(vpx,vpy-8);lx.lineTo(vpx,vpy+8);lx.stroke();
+        lx.setLineDash([]);
+        lx.fillStyle='rgba(255,152,0,0.8)';lx.font='9px IBM Plex Mono';
+        lx.fillText('VP',vpx+10,vpy+3);
+      }
+      // Show swimmer color swatch if sampled
+      if(swimmerColor){
+        const sx2=(tl+tr)/2+30, sy2=topPx+10;
+        lx.fillStyle='rgb('+swimmerColor.rgb.r+','+swimmerColor.rgb.g+','+swimmerColor.rgb.b+')';
+        lx.beginPath();lx.arc(sx2,sy2,5,0,Math.PI*2);lx.fill();
+        lx.strokeStyle='#fff';lx.lineWidth=1;lx.beginPath();lx.arc(sx2,sy2,5,0,Math.PI*2);lx.stroke();
+        lx.fillStyle='rgba(255,255,255,0.8)';lx.font='9px IBM Plex Mono';lx.textAlign='left';
+        lx.fillText('TRACKING',sx2+8,sy2+3);
+      }
     }
   } else if(laneX>=0&&!ropeLeft){
     // Legacy vertical band fallback
@@ -757,7 +890,7 @@ V.addEventListener('error',function(){showSt('Error: '+(V.error?'Code '+V.error.
 V.addEventListener('play',function(){playing=true;document.getElementById('play-btn').className='btn btn-pause';document.getElementById('play-btn').innerHTML='⏸ PAUSE';updateMode();if(V.requestVideoFrameCallback)V.requestVideoFrameCallback(onVF)});
 V.addEventListener('pause',function(){playing=false;document.getElementById('play-btn').className='btn btn-play';document.getElementById('play-btn').innerHTML='▶ PLAY';updateMode()});
 V.addEventListener('ended',function(){playing=false;document.getElementById('play-btn').className='btn btn-play';document.getElementById('play-btn').innerHTML='▶ PLAY';updateMode()});
-V.addEventListener('click',function(e){if(selectingLane){handleLaneSelect(e);return}if(markingWall){handlePoolMark(e);return}if(videoReady&&!scanning)toggle()});
+V.addEventListener('click',function(e){if(selectingLane||selectingSwimmer){handleLaneSelect(e);return}if(markingWall){handlePoolMark(e);return}if(videoReady&&!scanning)toggle()});
 
 function resizeCanvas(){const r=V.getBoundingClientRect(),d=window.devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;canvas.style.width=r.width+'px';canvas.style.height=r.height+'px';ctx.setTransform(d,0,0,d,0,0);redrawAll()}
 window.addEventListener('resize',function(){if(V.src){resizeCanvas();drawLaneOverlay();drawGraph();if(scanned)drawMotionGraph()}});
@@ -852,16 +985,17 @@ async function scanVideo(){
 
     if(i>0){
       if(camMode==='fixed'||camMode==='endon'){
-        // FIXED/END-ON CAMERA: find swimmer via motion centroid
+        // FIXED/END-ON CAMERA: find swimmer via color tracking or motion centroid
         const frameData=sx.getImageData(0,0,sw,sh).data;
         if(prevFrame){
           let motionWX=0,motionWY=0,motionTotal=0;
+          let colorWX=0,colorWY=0,colorTotal=0;
           const step=2;
+          const useColor=(swimmerColor!==null);
           // Lane filter: restrict to selected region
           const usePerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
           let yStart=0,yEnd=sh;
           if(usePerspective){
-            // Clamp scanning to the water surface Y range
             yStart=Math.max(0,Math.floor(waterYmin*sh));
             yEnd=Math.min(sh,Math.floor(waterYmax*sh));
           } else if(!usePerspective&&laneY>=0){
@@ -871,7 +1005,6 @@ async function scanVideo(){
           for(let y=yStart;y<yEnd;y+=step){
             let xStart=0,xEnd=sw;
             if(usePerspective){
-              // Perspective lane: compute X bounds at this Y row
               const bounds=getLaneBoundsAtY(y/sh);
               if(bounds){xStart=Math.max(0,Math.floor(bounds.xLeft*sw));xEnd=Math.min(sw,Math.floor(bounds.xRight*sw))}
             } else if(camMode==='endon'&&laneX>=0){
@@ -880,19 +1013,36 @@ async function scanVideo(){
             }
             for(let x=xStart;x<xEnd;x+=step){
               const idx=(y*sw+x)*4;
+              if(useColor){
+                // Color matching: check if pixel matches swimmer's cap color in HSV space
+                const hsv=rgbToHsv(frameData[idx],frameData[idx+1],frameData[idx+2]);
+                let hDiff=Math.abs(hsv.h-swimmerColor.medH);
+                if(hDiff>180) hDiff=360-hDiff; // circular hue distance
+                if(hDiff<swimmerColor.hRange &&
+                   Math.abs(hsv.s-swimmerColor.medS)<swimmerColor.sRange &&
+                   Math.abs(hsv.v-swimmerColor.medV)<swimmerColor.vRange){
+                  // Also require motion to filter out static colored objects
+                  const diff=Math.abs(frameData[idx]-prevFrame[idx])
+                            +Math.abs(frameData[idx+1]-prevFrame[idx+1])
+                            +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
+                  const weight=diff>15?2:1; // moving color pixels weighted higher
+                  colorWX+=x*weight;colorWY+=y*weight;colorTotal+=weight;
+                }
+              }
+              // Always compute motion as fallback
               const diff=Math.abs(frameData[idx]-prevFrame[idx])
                         +Math.abs(frameData[idx+1]-prevFrame[idx+1])
                         +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
               if(diff>40){motionWX+=x*diff;motionWY+=y*diff;motionTotal+=diff}
             }
           }
+          // Use color centroid if enough matching pixels found, otherwise fall back to motion
+          const useColorResult=(useColor && colorTotal>10);
           if(camMode==='endon'){
-            // End-on: track Y position (swimmer moves toward/away from camera)
-            const swimmerY=motionTotal>0?motionWY/motionTotal:sh/2;
-            rawDisplacements.push({time:t,posX:swimmerY/sh}); // store as posX for compatibility
+            const swimmerY=useColorResult?(colorWY/colorTotal):(motionTotal>0?motionWY/motionTotal:sh/2);
+            rawDisplacements.push({time:t,posX:swimmerY/sh});
           } else {
-            // Side view: track X position
-            const swimmerX=motionTotal>0?motionWX/motionTotal:sw/2;
+            const swimmerX=useColorResult?(colorWX/colorTotal):(motionTotal>0?motionWX/motionTotal:sw/2);
             rawDisplacements.push({time:t,posX:swimmerX/sw});
           }
         }
@@ -968,8 +1118,8 @@ async function scanVideo(){
   const dt=1/sampleFps;
   let rawSpeeds=[];
 
-  if(camMode==='fixed'){
-    // Fixed camera: swimmer position in normalized x (0-1)
+  if(camMode==='fixed'||camMode==='endon'){
+    // Fixed/End-on camera: swimmer position in normalized coordinate (0-1)
     // Step 1: Smooth posX with a wide median+mean filter to remove noise
     const posArr=rawDisplacements.map(function(d){return d.posX});
     const smoothR=7; // ±7 frames at 15fps = ±0.47s
@@ -978,28 +1128,75 @@ async function scanVideo(){
       const window=[];
       for(let j=lo;j<=hi;j++)window.push(posArr[j]);
       window.sort(function(a,b){return a-b});
-      // Trimmed mean: drop lowest and highest, average the rest
       if(window.length>4){window.shift();window.pop()}
       return window.reduce(function(a,b){return a+b},0)/window.length;
     });
+
+    // Step 1b: For endon mode with vanishing point, convert pixel positions to real distances
+    // Perspective correction: real_distance ∝ 1/(y_pixel - y_vanish)
+    // Objects near the vanishing point (far end of pool) are compressed; objects near camera are expanded
+    let correctedPos=smoothPos;
+    if(camMode==='endon'&&vanishPt){
+      const yV=vanishPt.y; // vanishing point Y in normalized coords
+      // Map each position from pixel-space to perspective-corrected space
+      // Using the relation: real_dist = k / (posY - yV) where k is a constant
+      // We normalize so the total corrected travel = total pool distance
+      const rawReal=smoothPos.map(function(p){
+        const denom=p-yV;
+        // If swimmer is between vanishing point and camera, denom > 0
+        // Larger denom = closer to camera = less compression = larger real distance per pixel
+        if(Math.abs(denom)<0.01) return 0;
+        return 1.0/denom; // proportional to real distance from vanishing point
+      });
+      // Normalize: compute incremental corrected displacements
+      let totalCorrTravel=0;
+      const corrDisp=[];
+      for(let i=1;i<rawReal.length;i++){
+        // Average the correction factor at both endpoints
+        const corrFactor=(Math.abs(rawReal[i])+Math.abs(rawReal[i-1]))/2;
+        const pixelDisp=Math.abs(smoothPos[i]-smoothPos[i-1]);
+        corrDisp.push(pixelDisp*corrFactor);
+        totalCorrTravel+=pixelDisp*corrFactor;
+      }
+      // Rebuild corrected positions from corrected displacements
+      correctedPos=[smoothPos[0]];
+      let cumCorr=0;
+      for(let i=0;i<corrDisp.length;i++){
+        cumCorr+=corrDisp[i];
+        correctedPos.push(smoothPos[0]+cumCorr*(smoothPos[smoothPos.length-1]>smoothPos[0]?1:-1));
+      }
+      // Normalize correctedPos to same range as smoothPos for downstream calibration
+      const corrMin=Math.min.apply(null,correctedPos);
+      const corrMax=Math.max.apply(null,correctedPos);
+      const origMin=Math.min.apply(null,smoothPos);
+      const origMax=Math.max.apply(null,smoothPos);
+      if(corrMax>corrMin&&origMax>origMin){
+        correctedPos=correctedPos.map(function(v){
+          return origMin+(v-corrMin)/(corrMax-corrMin)*(origMax-origMin);
+        });
+      }
+      console.log('Perspective correction applied: vanishY='+yV.toFixed(3)+
+        ', total pixel travel='+smoothPos.reduce(function(s,_,i){return i>0?s+Math.abs(smoothPos[i]-smoothPos[i-1]):s},0).toFixed(3)+
+        ', total corrected travel='+totalCorrTravel.toFixed(3));
+    }
 
     // Step 2: Calibrate — map normalized displacement to real distance
     let normPerUnit;
     if(poolStartX>=0&&poolFarX>=0){
       const poolSpan=Math.abs(poolFarX-poolStartX);
-      const lapDist=getLapLen(); // in course units
+      const lapDist=getLapLen();
       normPerUnit=poolSpan/lapDist;
     } else {
       let totalTravel=0;
-      for(let i=1;i<smoothPos.length;i++){
-        totalTravel+=Math.abs(smoothPos[i]-smoothPos[i-1]);
+      for(let i=1;i<correctedPos.length;i++){
+        totalTravel+=Math.abs(correctedPos[i]-correctedPos[i-1]);
       }
       normPerUnit=totalTravel>0?totalTravel/totalDistInUnit:1;
     }
 
-    // Step 3: Compute speed from smoothed positions
-    for(let i=1;i<smoothPos.length;i++){
-      const dx=Math.abs(smoothPos[i]-smoothPos[i-1]);
+    // Step 3: Compute speed from corrected positions
+    for(let i=1;i<correctedPos.length;i++){
+      const dx=Math.abs(correctedPos[i]-correctedPos[i-1]);
       rawSpeeds.push({time:rawDisplacements[i].time,speed:dx/(normPerUnit*dt)});
     }
 
