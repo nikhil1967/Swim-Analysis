@@ -481,24 +481,120 @@ function getVideoRenderRect(){
   else{const rW=rect.height*vidAR;return{x:(rect.width-rW)/2,y:0,w:rW,h:rect.height}}
 }
 
-// Camera motion compensation: cumulative shift from zoom/pan during scan
+// Dynamic rope tracking: live lane bounds detected from rope colors each frame
+// Falls back to static rope lines + camera shift compensation when detection fails
+let liveRopeLeft=null, liveRopeRight=null; // current-frame rope X at each scanned Y
 let cameraShiftX=0, cameraShiftY=0; // accumulated shift in normalized coords (0-1)
 
+// Detect lane rope edges in the current frame by looking for bright features (rope)
+// against dark water. Lane ropes are white/blue/red — much brighter than water.
+// frameData: ImageData.data, sw/sh: frame size
+// Returns {left:{x1,y1,x2,y2}, right:{x1,y1,x2,y2}} or null
+function detectRopesInFrame(frameData,sw,sh){
+  if(!ropeLeft||!ropeRight) return null;
+
+  // Scan 4 horizontal lines spread through the lane area
+  const scanYs=[0.35,0.50,0.65,0.80]; // normalized Y positions
+  const leftPts=[], rightPts=[];
+
+  for(let si=0;si<scanYs.length;si++){
+    const yNorm=waterYmin+(waterYmax-waterYmin)*scanYs[si];
+    const y=Math.floor(yNorm*sh);
+    if(y<0||y>=sh) continue;
+
+    // Expected rope positions from STATIC lines + shift (not live, to avoid feedback)
+    const adjY=yNorm-cameraShiftY;
+    const lDy=ropeLeft.y2-ropeLeft.y1;
+    const lT=lDy!==0?(adjY-ropeLeft.y1)/lDy:0.5;
+    const rDy=ropeRight.y2-ropeRight.y1;
+    const rT=rDy!==0?(adjY-ropeRight.y1)/rDy:0.5;
+    const expXL=ropeLeft.x1+lT*(ropeLeft.x2-ropeLeft.x1)+cameraShiftX;
+    const expXR=ropeRight.x1+rT*(ropeRight.x2-ropeRight.x1)+cameraShiftX;
+    const expected={xLeft:Math.min(expXL,expXR), xRight:Math.max(expXL,expXR)};
+
+    // Search window: ±12% of frame width around expected position
+    const searchR=Math.floor(sw*0.12);
+    // Rope width in pixels (ropes are narrow: ~4-12px depending on zoom)
+    const maxRopeW=Math.floor(sw*0.04);
+
+    // Helper: find the center of a narrow bright feature near expected X
+    function findRopeEdge(expX){
+      // Build a brightness profile along the scan line
+      const lo=Math.max(0,expX-searchR);
+      const hi=Math.min(sw-1,expX+searchR);
+      // Find bright clusters — groups of consecutive bright pixels
+      let bestCenter=-1, bestScore=0;
+      let clusterStart=-1;
+      for(let x=lo;x<=hi+1;x++){
+        const idx=(y*sw+x)*4;
+        const bright=x<=hi?(frameData[idx]*0.299+frameData[idx+1]*0.587+frameData[idx+2]*0.114):0;
+        if(bright>100&&x<=hi){
+          if(clusterStart<0) clusterStart=x;
+        } else {
+          if(clusterStart>=0){
+            const clusterW=x-clusterStart;
+            if(clusterW<=maxRopeW&&clusterW>=1){
+              // This looks like a rope-width bright feature
+              const center=clusterStart+clusterW/2;
+              // Compute average brightness of cluster
+              let avgB=0;
+              for(let cx=clusterStart;cx<x;cx++){
+                const ci=(y*sw+cx)*4;
+                avgB+=frameData[ci]*0.299+frameData[ci+1]*0.587+frameData[ci+2]*0.114;
+              }
+              avgB/=clusterW;
+              // Score: brightness + proximity to expected + penalty for wide clusters
+              const proxScore=1-Math.abs(center-expX)/(searchR*1.5);
+              const widthPenalty=1-clusterW/maxRopeW*0.3; // slight penalty for wide
+              const score=avgB*0.5+proxScore*100*widthPenalty;
+              if(score>bestScore){bestScore=score;bestCenter=center}
+            }
+            clusterStart=-1;
+          }
+        }
+      }
+      return bestCenter;
+    }
+
+    const lx=findRopeEdge(Math.floor(expected.xLeft*sw));
+    const rx=findRopeEdge(Math.floor(expected.xRight*sw));
+
+    if(lx>=0) leftPts.push({x:lx/sw, y:yNorm});
+    if(rx>=0) rightPts.push({x:rx/sw, y:yNorm});
+  }
+
+  // Need at least 2 points on each side to form a line
+  if(leftPts.length<2||rightPts.length<2) return null;
+
+  // Sort by y and use first/last as the line endpoints
+  leftPts.sort(function(a,b){return a.y-b.y});
+  rightPts.sort(function(a,b){return a.y-b.y});
+
+  return{
+    left:{x1:leftPts[0].x, y1:leftPts[0].y, x2:leftPts[leftPts.length-1].x, y2:leftPts[leftPts.length-1].y},
+    right:{x1:rightPts[0].x, y1:rightPts[0].y, x2:rightPts[rightPts.length-1].x, y2:rightPts[rightPts.length-1].y}
+  };
+}
+
 // Get lane X boundaries at a given Y (0-1) using the two rope lines
-// Applies camera motion compensation when available
+// Uses live rope detection when available, falls back to static + shift compensation
 // Returns {xLeft, xRight} in 0-1 coords, or null if no perspective lane defined
 function getLaneBoundsAtY(yNorm){
   if(!ropeLeft||!ropeRight) return null;
-  // Apply camera shift compensation: adjust Y query to account for frame shift
-  const adjY=yNorm-cameraShiftY;
-  // Interpolate X along left rope line at this Y
-  const lDy=ropeLeft.y2-ropeLeft.y1;
-  const lT=lDy!==0?(adjY-ropeLeft.y1)/lDy:0.5;
-  const xL=ropeLeft.x1+lT*(ropeLeft.x2-ropeLeft.x1)+cameraShiftX;
-  // Interpolate X along right rope line at this Y
-  const rDy=ropeRight.y2-ropeRight.y1;
-  const rT=rDy!==0?(adjY-ropeRight.y1)/rDy:0.5;
-  const xR=ropeRight.x1+rT*(ropeRight.x2-ropeRight.x1)+cameraShiftX;
+
+  // Use live-detected ropes if available (updated each frame during scan)
+  const useLeft=liveRopeLeft||ropeLeft;
+  const useRight=liveRopeRight||ropeRight;
+  const shiftX=liveRopeLeft?0:cameraShiftX; // no shift needed for live detection
+  const shiftY=liveRopeLeft?0:cameraShiftY;
+
+  const adjY=yNorm-shiftY;
+  const lDy=useLeft.y2-useLeft.y1;
+  const lT=lDy!==0?(adjY-useLeft.y1)/lDy:0.5;
+  const xL=useLeft.x1+lT*(useLeft.x2-useLeft.x1)+shiftX;
+  const rDy=useRight.y2-useRight.y1;
+  const rT=rDy!==0?(adjY-useRight.y1)/rDy:0.5;
+  const xR=useRight.x1+rT*(useRight.x2-useRight.x1)+shiftX;
   return {xLeft:Math.min(xL,xR), xRight:Math.max(xL,xR)};
 }
 
@@ -1084,6 +1180,7 @@ async function scanVideo(){
   const rawDisplacements=[],rawMotion=[];
   laneMotionEnergy=[]; // per-frame total motion energy within lane bounds (for wall detection)
   cameraShiftX=0;cameraShiftY=0; // reset camera motion compensation
+  liveRopeLeft=null;liveRopeRight=null; // reset live rope detection
   const progress=document.getElementById('scan-progress');
 
   for(let i=0;i<=totalSamples;i++){
@@ -1105,6 +1202,17 @@ async function scanVideo(){
           const usePerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
 
           if(camMode==='endon'){
+            // === DYNAMIC ROPE DETECTION ===
+            // Track lane ropes by their brightness (white/blue/red vs dark water)
+            // every 5th frame to keep it fast. Updates live rope lines.
+            if(usePerspective && i%5===0){
+              const ropes=detectRopesInFrame(frameData,sw,sh);
+              if(ropes){
+                liveRopeLeft=ropes.left;
+                liveRopeRight=ropes.right;
+              }
+            }
+
             // ===== ENDON LEADING-EDGE TRACKER =====
             // Instead of finding the centroid of all motion (which gets pulled by splash),
             // build a 1D motion profile along Y (distance from camera) and find the
@@ -1542,6 +1650,7 @@ async function scanVideo(){
 
   // ===== WALL TURN DETECTION =====
   document.getElementById('scan-st').textContent='Finding wall turns...';
+  await new Promise(function(r){setTimeout(r,0)}); // yield so status text repaints
   try{
     wallTouches=detectWallTurns(rawDisplacements,sampleFps);
   }catch(e){
@@ -1550,22 +1659,26 @@ async function scanVideo(){
   }
 
   // ===== BLOCK DEPARTURE =====
+  document.getElementById('scan-st').textContent='Detecting block departure...';
+  await new Promise(function(r){setTimeout(r,0)});
   blockDepartTime=detectBlockDeparture(motionData,beepTime);
 
   // ===== BREAKOUT DETECTION =====
   document.getElementById('scan-st').textContent='Detecting breakouts...';
+  await new Promise(function(r){setTimeout(r,0)});
   breakouts=detectBreakouts(motionData,wallTouches,blockDepartTime,sampleFps);
 
   // ===== UNDERWATER SPEED MODEL =====
-  // Replace unreliable pixel tracking during underwater phases with physics-based decay model
   if(breakouts&&(breakouts.startBreakout>0||breakouts.turnBreakouts.some(function(b){return b>0}))){
     document.getElementById('scan-st').textContent='Modeling underwater speed...';
+    await new Promise(function(r){setTimeout(r,0)});
     flowData=applyUnderwaterSpeedModel(flowData,breakouts,wallTouches,blockDepartTime,dt);
   }
 
   // ===== WALL-TO-WALL SPEED CALIBRATION =====
   if(wallTouches.length>0){
     document.getElementById('scan-st').textContent='Calibrating speed from wall times...';
+    await new Promise(function(r){setTimeout(r,0)});
     flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,dt);
   }
 
@@ -2133,7 +2246,7 @@ function resetVideo(){
   V.pause();V.removeAttribute('src');V.load();
 
   // Clear all data
-  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];cameraShiftX=0;cameraShiftY=0;
+  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];cameraShiftX=0;cameraShiftY=0;liveRopeLeft=null;liveRopeRight=null;
   scanning=false;scanned=false;videoReady=false;playing=false;
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
