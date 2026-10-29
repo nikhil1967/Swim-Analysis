@@ -1166,6 +1166,19 @@ async function scanVideo(){
             for(let j=0;j<numBins;j++){if(combined[j]>peakVal) peakVal=combined[j]}
             const edgeThresh=peakVal*0.20;
 
+            // === ZOOM/PAN DETECTION ===
+            // If motion is spread across >50% of Y bins, it's camera zoom/pan,
+            // not swimmer motion. Hold position during camera motion frames.
+            let activeBins=0;
+            for(let j=0;j<numBins;j++){
+              if(smMotion[j]>edgeThresh*0.3) activeBins++;
+            }
+            const motionSpread=numBins>0?activeBins/numBins:0;
+            if(motionSpread>0.50 && rawDisplacements.length>0){
+              // Camera zoom/pan detected — hold previous position
+              rawDisplacements.push({time:t,posX:rawDisplacements[rawDisplacements.length-1].posX});
+            } else {
+
             // Determine swim direction from previous positions to find leading edge
             // Swimming TOWARD camera: leading edge = highest Y (bottom of active zone)
             // Swimming AWAY from camera: leading edge = lowest Y (top of active zone)
@@ -1198,27 +1211,36 @@ async function scanVideo(){
             }
 
             // Blend: use 70% leading edge + 30% peak position
-            // The leading edge tracks the front of the swimmer,
-            // the peak prevents overshooting when splash is ahead (e.g., during a turn)
             let swimmerY;
             if(edgeY>=0){
               swimmerY=edgeY*0.7+peakY*0.3;
             } else {
-              swimmerY=peakY; // no motion found, use peak
+              swimmerY=peakY;
             }
 
-            // Temporal smoothing: EMA with α=0.5 (responsive but smooth)
-            const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*sh:-1;
+            // Temporal smoothing: EMA with α=0.5
+            const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*waterRange:-1;
+            // Normalize position to WATER BOUNDS, not frame height.
+            // swimmerY is in pixel coords within [waterYmin*sh, waterYmax*sh].
+            // Map to [0,1] within visible pool area so position is independent of
+            // how much non-pool area (deck, sky) is in frame.
+            const waterTop=waterYmin*sh;
+            const waterBot=waterYmax*sh;
+            const waterRange=Math.max(waterBot-waterTop,1);
             if(prevPosY>=0){
-              // Limit max jump per frame to 10% of frame height
-              const maxJump=sh*0.10;
-              const delta=swimmerY-prevPosY;
+              // Limit max jump per frame to 10% of water range
+              const maxJump=waterRange*0.10;
+              const delta=swimmerY-waterTop-prevPosY;
               if(Math.abs(delta)>maxJump){
-                swimmerY=prevPosY+Math.sign(delta)*maxJump;
+                swimmerY=waterTop+prevPosY+Math.sign(delta)*maxJump;
               }
-              swimmerY=0.5*swimmerY+0.5*prevPosY;
+              const newRel=swimmerY-waterTop;
+              const smoothed=0.5*newRel+0.5*prevPosY;
+              rawDisplacements.push({time:t,posX:smoothed/waterRange});
+            } else {
+              rawDisplacements.push({time:t,posX:(swimmerY-waterTop)/waterRange});
             }
-            rawDisplacements.push({time:t,posX:swimmerY/sh});
+            } // end zoom/pan else
 
           } else {
             // ===== FIXED (SIDE VIEW) CAMERA: centroid tracker =====
@@ -2262,10 +2284,30 @@ function detectWallTurns(rawDisplacements,sampleFps){
   const minTimeToFirstWall=lapLen>=50?20:10; // seconds from video start (fastest 25yd ~10s)
   const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
 
+  // For endon mode: find position extremes to validate wall touches
+  // A real wall touch should be near the top or bottom of the swimmer's range,
+  // not in the middle of the pool
+  let posMin=Infinity,posMax=-Infinity;
+  for(let i=0;i<smoothPos.length;i++){
+    if(smoothPos[i]<posMin) posMin=smoothPos[i];
+    if(smoothPos[i]>posMax) posMax=smoothPos[i];
+  }
+  const posRange=posMax-posMin;
+  // Wall zone: outer 25% of the position range on each side
+  const wallZoneFrac=0.25;
+  const wallLo=posMin+posRange*wallZoneFrac;
+  const wallHi=posMax-posRange*wallZoneFrac;
+
   for(let i=1;i<sVel.length;i++){
     if(sVel[i]*sVel[i-1]<0 && (i-lastTurnI)>minGap){
       // Skip if too early for a realistic wall touch
       if(rawDisplacements[i].time-raceStart<minTimeToFirstWall) continue;
+
+      // In endon mode: require the turn position to be near the extremes
+      // (swimmer must actually be near a wall, not in mid-pool due to zoom artifact)
+      if(camMode==='endon' && posRange>0.05){
+        if(smoothPos[i]>wallLo && smoothPos[i]<wallHi) continue; // mid-pool, skip
+      }
 
       const rangeStart=Math.max(0,lastTurnI);
       let displacement=0;
