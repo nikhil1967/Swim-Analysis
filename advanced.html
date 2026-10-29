@@ -374,7 +374,7 @@ let numLaps=2; // computed from event + course
 let detectedStroke='unknown',speedUnit='yd/s';
 let camMode='fixed'; // 'fixed' or 'follow'
 let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
-let beepTime=-1,blockDepartTime=-1,wallTouches=[]; // timing events
+let beepTime=-1,blockDepartTime=-1,wallTouches=[],breakouts=null; // timing events
 let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
 let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width (legacy fallback)
 let selectingLane=false;
@@ -1252,6 +1252,17 @@ async function scanVideo(){
   // ===== BLOCK DEPARTURE =====
   blockDepartTime=detectBlockDeparture(motionData,beepTime);
 
+  // ===== BREAKOUT DETECTION =====
+  document.getElementById('scan-st').textContent='Detecting breakouts...';
+  breakouts=detectBreakouts(motionData,wallTouches,blockDepartTime,sampleFps);
+
+  // ===== UNDERWATER SPEED MODEL =====
+  // Replace unreliable pixel tracking during underwater phases with physics-based decay model
+  if(breakouts&&(breakouts.startBreakout>0||breakouts.turnBreakouts.some(function(b){return b>0}))){
+    document.getElementById('scan-st').textContent='Modeling underwater speed...';
+    flowData=applyUnderwaterSpeedModel(flowData,breakouts,wallTouches,blockDepartTime,dt);
+  }
+
   // ===== WALL-TO-WALL SPEED CALIBRATION =====
   if(wallTouches.length>0){
     document.getElementById('scan-st').textContent='Calibrating speed from wall times...';
@@ -1579,6 +1590,46 @@ function drawGraph(){
       if(wallTouches.length>1) lbl+=' '+(i+1);
       drawEventMarker(w.time,'#e040fb',lbl,[6,3]);
     });
+    // Breakout markers
+    if(breakouts){
+      if(breakouts.startBreakout>0) drawEventMarker(breakouts.startBreakout,'#00e5ff','BRK',[3,2]);
+      breakouts.turnBreakouts.forEach(function(bt,i){
+        if(bt>0) drawEventMarker(bt,'#00e5ff','BRK'+(i+1),[3,2]);
+      });
+    }
+    // Shade underwater phases on the graph
+    if(breakouts){
+      gx.save();
+      gx.fillStyle='rgba(0,229,255,0.08)';
+      function shadeUW(startT,endT){
+        if(endT<=startT)return;
+        var x0,x1;
+        if(flowData.length>0&&flowData[flowData.length-1].distance>0){
+          // Distance axis — find distance at these times
+          var d0=0,d1=0;
+          for(var fi=0;fi<flowData.length;fi++){
+            if(flowData[fi].time<=startT) d0=flowData[fi].distance;
+            if(flowData[fi].time<=endT) d1=flowData[fi].distance;
+          }
+          var maxDist=flowData[flowData.length-1].distance||1;
+          x0=pad.l+(d0/maxDist)*gW;
+          x1=pad.l+(d1/maxDist)*gW;
+        } else {
+          var dur=flowData.length>0?flowData[flowData.length-1].time-flowData[0].time:1;
+          var t0f=flowData.length>0?flowData[0].time:0;
+          x0=pad.l+((startT-t0f)/dur)*gW;
+          x1=pad.l+((endT-t0f)/dur)*gW;
+        }
+        gx.fillRect(x0,pad.t,x1-x0,gH);
+      }
+      if(breakouts.startBreakout>0&&blockDepartTime>0) shadeUW(blockDepartTime,breakouts.startBreakout);
+      for(var wi=0;wi<wallTouches.length;wi++){
+        if(wi<breakouts.turnBreakouts.length&&breakouts.turnBreakouts[wi]>0){
+          shadeUW(wallTouches[wi].time,breakouts.turnBreakouts[wi]);
+        }
+      }
+      gx.restore();
+    }
   })();
 
   // Cursor
@@ -2161,6 +2212,133 @@ function detectBlockDeparture(motionData,beepT){
   return -1;
 }
 
+// ===== BREAKOUT DETECTION =====
+// Detect when the swimmer resurfaces after a start or wall turn
+// Uses motion energy: underwater = low energy (streamline), breakout = energy rises (first stroke)
+function detectBreakouts(motionData,wallTouches,blockDepartT,sampleFps){
+  if(!motionData||motionData.length<10) return {startBreakout:-1,turnBreakouts:[]};
+
+  // Compute swimming-level energy baseline: median energy in the middle portion of race
+  const midStart=Math.floor(motionData.length*0.3);
+  const midEnd=Math.floor(motionData.length*0.7);
+  const midEnergies=motionData.slice(midStart,midEnd).map(function(m){return m.energy});
+  midEnergies.sort(function(a,b){return a-b});
+  const swimmingBaseline=midEnergies.length>0?midEnergies[Math.floor(midEnergies.length*0.5)]:1;
+  // Breakout threshold: energy rises above 40% of swimming baseline
+  // (underwater motion is typically 10-30% of surface swimming energy)
+  const breakoutThresh=swimmingBaseline*0.4;
+  const sustainFrames=Math.max(2,Math.round(sampleFps*0.3)); // ~0.3s sustained
+
+  function findBreakout(searchStartTime,searchEndTime){
+    // After a push-off/dive, motion energy drops during streamline,
+    // then rises when swimmer begins first stroke (breakout)
+    // Find the first sustained rise above threshold after the initial drop
+    let foundLow=false;
+    let runLen=0;
+    for(let i=0;i<motionData.length;i++){
+      if(motionData[i].time<searchStartTime) continue;
+      if(motionData[i].time>searchEndTime) break;
+      // First wait for energy to drop (streamline phase)
+      if(!foundLow){
+        if(motionData[i].energy<breakoutThresh) foundLow=true;
+        continue;
+      }
+      // Then find when it rises back up (breakout)
+      if(motionData[i].energy>breakoutThresh){
+        runLen++;
+        if(runLen>=sustainFrames){
+          return motionData[i-runLen+1].time;
+        }
+      } else {
+        runLen=0;
+      }
+    }
+    return -1;
+  }
+
+  // Start breakout: after block departure, swimmer enters water and goes underwater
+  let startBreakout=-1;
+  if(blockDepartT>0){
+    const searchEnd=wallTouches.length>0?wallTouches[0].time:
+      (motionData.length>0?Math.min(blockDepartT+15,motionData[motionData.length-1].time):blockDepartT+15);
+    startBreakout=findBreakout(blockDepartT+0.5, searchEnd);
+    console.log('Start breakout: '+startBreakout.toFixed(2)+'s (searched '+blockDepartT.toFixed(2)+'-'+searchEnd.toFixed(2)+')');
+  }
+
+  // Turn breakouts: after each wall touch
+  const turnBreakouts=wallTouches.map(function(w,i){
+    const searchEnd=i<wallTouches.length-1?wallTouches[i+1].time:
+      (motionData.length>0?Math.min(w.time+15,motionData[motionData.length-1].time):w.time+15);
+    const bt=findBreakout(w.time+0.3, searchEnd);
+    console.log('Turn '+(i+1)+' breakout: '+(bt>=0?bt.toFixed(2)+'s':'not found')+
+      ' (searched '+w.time.toFixed(2)+'-'+searchEnd.toFixed(2)+')');
+    return bt;
+  });
+
+  return {
+    startBreakout:startBreakout,
+    turnBreakouts:turnBreakouts,
+    swimmingBaseline:swimmingBaseline,
+    breakoutThresh:breakoutThresh
+  };
+}
+
+// ===== UNDERWATER SPEED MODELING =====
+// During underwater phases, model speed as exponential decay from push-off velocity
+// rather than trusting pixel tracking (cap is submerged, tracking unreliable)
+function applyUnderwaterSpeedModel(flowData,breakouts,wallTouches,blockDepartT,dt){
+  if(!flowData||flowData.length===0) return flowData;
+
+  // Model: speed(t) = v_pushoff * exp(-k * (t - t_wall))
+  // where v_pushoff ≈ 2× average swimming speed (from push-off momentum)
+  // and k is chosen so speed decays to swimming speed by breakout time
+  // This is physically realistic: push-off is ~3-4 m/s, decays to ~1.5-2 m/s by breakout
+
+  // Get average swimming speed from the flow data
+  const speeds=flowData.map(function(d){return d.speed});
+  speeds.sort(function(a,b){return a-b});
+  const medianSpeed=speeds[Math.floor(speeds.length*0.5)]||1.5;
+  const pushoffSpeed=medianSpeed*2.2; // typical push-off is 2-2.5× swimming speed
+
+  function modelUnderwater(wallTime,breakoutTime){
+    if(breakoutTime<0||breakoutTime<=wallTime) return;
+    const uwDuration=breakoutTime-wallTime;
+    // k = ln(pushoffSpeed/medianSpeed) / uwDuration
+    // so speed decays from pushoffSpeed to medianSpeed over the underwater phase
+    const k=Math.log(pushoffSpeed/Math.max(0.1,medianSpeed))/uwDuration;
+
+    for(let i=0;i<flowData.length;i++){
+      const t=flowData[i].time;
+      if(t>=wallTime&&t<breakoutTime){
+        const elapsed=t-wallTime;
+        flowData[i].speed=pushoffSpeed*Math.exp(-k*elapsed);
+        flowData[i].underwater=true; // mark for graph rendering
+      }
+    }
+  }
+
+  // Apply to start underwater phase
+  if(breakouts.startBreakout>0&&blockDepartT>0){
+    modelUnderwater(blockDepartT,breakouts.startBreakout);
+  }
+
+  // Apply to each turn
+  for(let i=0;i<wallTouches.length;i++){
+    if(i<breakouts.turnBreakouts.length&&breakouts.turnBreakouts[i]>0){
+      modelUnderwater(wallTouches[i].time,breakouts.turnBreakouts[i]);
+    }
+  }
+
+  // Recompute cumulative distance
+  let cumDist=0;
+  for(let i=0;i<flowData.length;i++){
+    if(i>0) cumDist+=flowData[i].speed*dt;
+    flowData[i].distance=cumDist;
+  }
+
+  return flowData;
+}
+
 // ===== WALL-TO-WALL SPEED CALIBRATION =====
 function calibrateSpeedFromWalls(flowData,wallTouches,beepT,blockT,dt){
   // Build lap segments from timing events
@@ -2274,14 +2452,35 @@ function showTimingEvents(){
       document.getElementById('lap-splits-box').style.display='block';
       const srow=document.getElementById('lap-splits-row');
       srow.innerHTML='';
+
+      // Build breakout times aligned with laps
+      // Lap 1 breakout = startBreakout, Lap 2+ breakout = turnBreakout[lap-2]
+      const lapBreakouts=[];
+      if(breakouts){
+        lapBreakouts.push(breakouts.startBreakout); // lap 1
+        for(let bi=0;bi<breakouts.turnBreakouts.length;bi++){
+          lapBreakouts.push(breakouts.turnBreakouts[bi]);
+        }
+      }
+
       for(let i=1;i<splitTimes.length;i++){
         const lapTime=splitTimes[i]-splitTimes[i-1];
-        if(lapTime<=0)continue; // skip invalid
+        if(lapTime<=0)continue;
         const lapSpeed=(getLapLen()/lapTime).toFixed(2);
         const el=document.createElement('div');
         el.className='wt-item';
         el.style.background='rgba(118,255,3,.05)';el.style.color='#76ff03';
-        el.innerHTML='Lap '+i+': '+lapTime.toFixed(2)+'s <small>'+(isFinite(lapSpeed)?lapSpeed:'--')+' '+speedUnit+'</small>';
+        let html='Lap '+i+': '+lapTime.toFixed(2)+'s <small>'+(isFinite(lapSpeed)?lapSpeed:'--')+' '+speedUnit+'</small>';
+
+        // Underwater / surface split if breakout detected for this lap
+        const brkT=i<=lapBreakouts.length?lapBreakouts[i-1]:-1;
+        if(brkT>0&&brkT>splitTimes[i-1]&&brkT<splitTimes[i]){
+          const uwTime=(brkT-splitTimes[i-1]).toFixed(2);
+          const surfTime=(splitTimes[i]-brkT).toFixed(2);
+          html+='<br><small style="color:#00e5ff">🏊 UW '+uwTime+'s</small>';
+          html+=' <small style="color:#69f0ae">↑ Surface '+surfTime+'s</small>';
+        }
+        el.innerHTML=html;
         srow.appendChild(el);
       }
     }
