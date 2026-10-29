@@ -291,7 +291,7 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
     <div class="timing-box" id="timing-box">
       <h3>⏱ Race Timeline</h3>
       <div class="timing-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
-        <div class="timing-item"><div class="tl">🔔 Beep/Horn</div><div class="tv" id="tv-beep">--</div></div>
+        <div class="timing-item"><div class="tl">🔔 Beep/Horn <button id="set-beep-btn" onclick="startManualBeep()" style="font-size:8px;padding:1px 5px;background:#ff9800;color:#000;border:none;border-radius:3px;cursor:pointer;margin-left:3px;display:none" title="Click here then click the video frame where the horn sounds">SET</button></div><div class="tv" id="tv-beep">--</div></div>
         <div class="timing-item"><div class="tl">🏁 Block Depart</div><div class="tv" id="tv-block">--</div></div>
         <div class="timing-item"><div class="tl">⚡ Reaction</div><div class="tv" id="tv-react">--</div></div>
         <div class="timing-item"><div class="tl">↑ 1st Breakout</div><div class="tv" id="tv-breakout">--</div></div>
@@ -382,6 +382,7 @@ let detectedStroke='unknown',speedUnit='yd/s';
 let camMode='fixed'; // 'fixed' or 'follow'
 let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
 let beepTime=-1,blockDepartTime=-1,wallTouches=[],breakouts=null; // timing events
+let videoFileRef=null; // keep File reference for audio extraction
 let laneMotionEnergy=[]; // per-frame lane motion energy for event-based wall detection
 let officialTime=-1; // official race time in seconds (beep to finish touch)
 let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
@@ -1160,6 +1161,7 @@ function updateMode(){
 
 document.getElementById('file-input').addEventListener('change',function(e){
   const f=e.target.files[0];if(!f)return;
+  videoFileRef=f; // save for audio extraction
   showSt('Loading '+f.name+'...','loading');
   document.getElementById('upload-zone').style.display='none';
   document.getElementById('player-area').style.display='block';
@@ -1721,12 +1723,23 @@ async function scanVideo(){
   }
 
   // ===== BEEP DETECTION =====
-  document.getElementById('scan-st').textContent='Detecting beep...';
+  document.getElementById('scan-st').textContent='Detecting beep/horn in audio...';
+  await new Promise(function(r){setTimeout(r,0)});
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
   try{
     const bt=await detectBeep();
-    if(bt!==null)beepTime=bt;
-  }catch(e){console.warn('Beep detection error:',e)}
+    if(bt!==null){
+      beepTime=bt;
+      document.getElementById('scan-st').textContent='Beep found at '+bt.toFixed(3)+'s';
+    } else {
+      document.getElementById('scan-st').textContent='No beep detected — you can set it manually after scan';
+    }
+    await new Promise(function(r){setTimeout(r,0)});
+  }catch(e){
+    console.warn('Beep detection error:',e);
+    document.getElementById('scan-st').textContent='Beep detection error — you can set it manually after scan';
+    await new Promise(function(r){setTimeout(r,0)});
+  }
 
   // ===== WALL TURN DETECTION =====
   document.getElementById('scan-st').textContent='Finding wall turns...';
@@ -2369,17 +2382,62 @@ function resetVideo(){
 async function detectBeep(){
   if(!V.src)return null;
   try{
-    // Fetch the video blob and decode audio
-    const resp=await fetch(V.src);
-    const buf=await resp.arrayBuffer();
+    // Try multiple methods to get audio data from the video
+    let audioBuf=null;
     const ac=new (window.AudioContext||window.webkitAudioContext)();
-    const audioBuf=await ac.decodeAudioData(buf);
-    ac.close();
+
+    // Method 1: Read directly from saved File reference (most reliable)
+    if(!audioBuf && videoFileRef){
+      try{
+        console.log('Beep: trying File.arrayBuffer()...');
+        const fbuf=await videoFileRef.arrayBuffer();
+        audioBuf=await ac.decodeAudioData(fbuf);
+        console.log('Beep: audio decoded from File ref, duration='+audioBuf.duration.toFixed(1)+'s, sr='+audioBuf.sampleRate);
+      }catch(e1){console.warn('Beep: File.arrayBuffer() decode failed:',e1.message)}
+    }
+
+    // Method 2: Fetch from blob URL
+    if(!audioBuf){
+      try{
+        console.log('Beep: trying fetch(V.src)...');
+        const resp=await fetch(V.src);
+        const buf=await resp.arrayBuffer();
+        audioBuf=await ac.decodeAudioData(buf);
+        console.log('Beep: audio decoded from blob URL, duration='+audioBuf.duration.toFixed(1)+'s');
+      }catch(e2){console.warn('Beep: blob URL decode failed:',e2.message)}
+    }
+
+    // Method 3: Capture audio from video element using MediaElementSource
+    if(!audioBuf){
+      try{
+        console.log('Beep: trying MediaElement capture (first 8s)...');
+        audioBuf=await captureAudioFromVideo(ac,8);
+        if(audioBuf) console.log('Beep: captured '+audioBuf.duration.toFixed(1)+'s via MediaElement');
+      }catch(e3){console.warn('Beep: MediaElement capture failed:',e3.message)}
+    }
+
+    if(!audioBuf){
+      ac.close();
+      console.error('Beep detection: all audio extraction methods failed');
+      return null;
+    }
 
     const sr=audioBuf.sampleRate;
     const raw=audioBuf.getChannelData(0);
+    ac.close();
 
-    // ===== METHOD 1: RMS energy onset =====
+    // Check if audio is actually silent (no audio track = all zeros)
+    let maxSample=0;
+    for(let k=0;k<Math.min(raw.length,sr*3);k++){
+      if(Math.abs(raw[k])>maxSample) maxSample=Math.abs(raw[k]);
+    }
+    if(maxSample<0.0001){
+      console.warn('Beep detection: audio track appears silent/empty (max sample='+maxSample.toFixed(6)+')');
+      return null;
+    }
+    console.log('Beep: audio max sample in first 3s = '+maxSample.toFixed(4));
+
+    // ===== RMS energy analysis =====
     const winSize=Math.floor(sr*0.02); // 20ms windows
     const hopSize=Math.floor(sr*0.01); // 10ms hop
     const rmsArr=[];
@@ -2391,27 +2449,29 @@ async function detectBeep(){
     if(rmsArr.length<20)return null;
 
     // Log first 3 seconds for debugging
-    var dbgStr='Beep detect RMS (first 3s): ';
-    for(var di=0;di<rmsArr.length&&rmsArr[di].time<3;di+=5){
+    var dbgStr='Beep RMS (first 2s): ';
+    for(var di=0;di<rmsArr.length&&rmsArr[di].time<2;di+=3){
       dbgStr+=rmsArr[di].time.toFixed(2)+':'+rmsArr[di].rms.toFixed(4)+' ';
     }
     console.log(dbgStr);
 
     let beepStart=-1;
 
-    // ===== STRATEGY A: Fixed baseline (original, proven method) =====
-    // Use the first 200ms as quiet baseline, find first onset after it.
-    // This works well when the video starts during "take your marks" silence.
+    // ===== STRATEGY A: Fixed baseline =====
+    // Use the first 100ms as quiet baseline (shorter to handle very early horns).
+    // Video starts during "take your marks" silence, horn comes quickly.
+    var baseMs=0.10; // 100ms baseline (was 200ms — too long for early horns)
     var baseEndIdx=0;
     for(var bi=0;bi<rmsArr.length;bi++){
-      if(rmsArr[bi].time>0.2){baseEndIdx=bi;break}
+      if(rmsArr[bi].time>baseMs){baseEndIdx=bi;break}
       baseEndIdx=bi;
     }
+    if(baseEndIdx<2) baseEndIdx=2; // need at least 2 windows
     var baseSum=0;
     for(var bi2=0;bi2<baseEndIdx;bi2++) baseSum+=rmsArr[bi2].rms;
     var baselineRms=baseEndIdx>0?baseSum/baseEndIdx:0;
 
-    // Peak RMS in the first 5 seconds
+    // Peak RMS in the first 5 seconds (search from right after baseline)
     var peakRms=0, peakIdx=-1;
     var searchLimitIdx=rmsArr.length;
     for(var si=0;si<rmsArr.length;si++){if(rmsArr[si].time>5){searchLimitIdx=si;break}}
@@ -2419,35 +2479,34 @@ async function detectBeep(){
       if(rmsArr[pi].rms>peakRms){peakRms=rmsArr[pi].rms;peakIdx=pi}
     }
 
-    // Threshold: 40% of the way from baseline to peak, but at least 1.5× baseline
-    var beepThresh=Math.max(baselineRms*1.5, baselineRms+(peakRms-baselineRms)*0.4);
+    // Threshold: 30% of the way from baseline to peak, but at least 1.5× baseline
+    var beepThresh=Math.max(baselineRms*1.5, baselineRms+(peakRms-baselineRms)*0.30);
     // For very quiet baselines, use absolute minimum
-    if(baselineRms<0.001) beepThresh=Math.max(0.002, peakRms*0.15);
+    if(baselineRms<0.005) beepThresh=Math.max(0.001, peakRms*0.10);
 
-    console.log('Beep detect: baseline(0-200ms):',baselineRms.toFixed(5),
-      'peak(0.2-5s):',peakRms.toFixed(5),'at',peakIdx>=0?rmsArr[peakIdx].time.toFixed(3):'?',
-      'thresh:',beepThresh.toFixed(5));
+    console.log('Beep A: baseline(0-'+baseMs+'s)='+baselineRms.toFixed(5)+
+      ' peak('+baseMs+'-5s)='+peakRms.toFixed(5)+' at '+(peakIdx>=0?rmsArr[peakIdx].time.toFixed(3):'?')+
+      ' thresh='+beepThresh.toFixed(5));
 
-    // Find first sustained crossing
+    // Find first sustained crossing (2 consecutive = 20ms, lowered from 3)
     var runLen=0;
     for(var fi=baseEndIdx;fi<searchLimitIdx;fi++){
       if(rmsArr[fi].rms>beepThresh){
         runLen++;
-        if(runLen>=3){
+        if(runLen>=2){
           beepStart=fi-runLen+1;
-          console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3)+'s via baseline method');
+          console.log('Beep: found at '+rmsArr[beepStart].time.toFixed(3)+'s via baseline method');
           break;
         }
       } else { runLen=0; }
     }
 
     // ===== STRATEGY B: Sliding-window onset detection =====
-    // For noisy recordings where the first 200ms isn't quiet
     if(beepStart<0){
       var bestOnsetIdx=-1, bestOnsetRatio=0;
-      for(var oi=10;oi<searchLimitIdx;oi++){
-        var prevStart2=Math.max(0,oi-30);
-        var prevEnd2=Math.max(0,oi-10);
+      for(var oi=5;oi<searchLimitIdx;oi++){
+        var prevStart2=Math.max(0,oi-20);
+        var prevEnd2=Math.max(0,oi-5);
         if(prevEnd2<=prevStart2)continue;
         var prevRms2=0;
         for(var pi2=prevStart2;pi2<prevEnd2;pi2++) prevRms2+=rmsArr[pi2].rms;
@@ -2456,22 +2515,22 @@ async function detectBeep(){
         var curRms2=0;
         for(var ci=oi;ci<curEnd2;ci++) curRms2+=rmsArr[ci].rms;
         curRms2/=(curEnd2-oi);
-        if(prevRms2>0.0001){
+        if(prevRms2>0.00005){
           var ratio=curRms2/prevRms2;
-          if(ratio>1.8 && curRms2>0.003){
+          if(ratio>1.5 && curRms2>0.001){
             var sustained=0;
             for(var si2=oi;si2<Math.min(oi+5,rmsArr.length);si2++){
-              if(rmsArr[si2].rms>prevRms2*1.3) sustained++;
+              if(rmsArr[si2].rms>prevRms2*1.2) sustained++;
             }
-            if(sustained>=3 && ratio>bestOnsetRatio){
+            if(sustained>=2 && ratio>bestOnsetRatio){
               bestOnsetRatio=ratio;bestOnsetIdx=oi;
             }
           }
         }
       }
-      if(bestOnsetIdx>=0 && bestOnsetRatio>2.0){
+      if(bestOnsetIdx>=0 && bestOnsetRatio>1.8){
         beepStart=bestOnsetIdx;
-        console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3)+'s via onset ratio ('+bestOnsetRatio.toFixed(1)+'x)');
+        console.log('Beep: found at '+rmsArr[beepStart].time.toFixed(3)+'s via onset ratio ('+bestOnsetRatio.toFixed(1)+'x)');
       }
     }
 
@@ -2480,32 +2539,55 @@ async function detectBeep(){
       var fallbackEnd=rmsArr.length;
       for(var fe=0;fe<rmsArr.length;fe++){if(rmsArr[fe].time>8){fallbackEnd=fe;break}}
       var bestJumpIdx=-1, bestJumpScore=0;
-      for(var ji=3;ji<fallbackEnd-3;ji++){
-        var bef=(rmsArr[ji-3].rms+rmsArr[ji-2].rms+rmsArr[ji-1].rms)/3;
-        var aft=(rmsArr[ji].rms+rmsArr[ji+1].rms+rmsArr[ji+2].rms)/3;
+      for(var ji=2;ji<fallbackEnd-2;ji++){
+        var bef=(rmsArr[Math.max(0,ji-2)].rms+rmsArr[ji-1].rms)/2;
+        var aft=(rmsArr[ji].rms+rmsArr[Math.min(rmsArr.length-1,ji+1)].rms)/2;
         var jmp=aft-bef;
-        if(jmp>bestJumpScore && jmp>0.002){
+        if(jmp>bestJumpScore && jmp>0.0005){
           var sc=0;
-          for(var sj=ji;sj<Math.min(ji+6,rmsArr.length);sj++){
-            if(rmsArr[sj].rms>bef+jmp*0.25)sc++;
+          for(var sj=ji;sj<Math.min(ji+4,rmsArr.length);sj++){
+            if(rmsArr[sj].rms>bef+jmp*0.2)sc++;
           }
-          if(sc>=3){bestJumpScore=jmp;bestJumpIdx=ji}
+          if(sc>=2){bestJumpScore=jmp;bestJumpIdx=ji}
         }
       }
       if(bestJumpIdx>=0){
         beepStart=bestJumpIdx;
-        console.log('Beep: found at',rmsArr[bestJumpIdx].time.toFixed(3)+'s via sharpest jump ('+bestJumpScore.toFixed(5)+')');
+        console.log('Beep: found at '+rmsArr[bestJumpIdx].time.toFixed(3)+'s via sharpest jump ('+bestJumpScore.toFixed(5)+')');
       }
     }
 
     if(beepStart>=0){
       return rmsArr[beepStart]?rmsArr[beepStart].time:beepStart*hopSize/sr;
     }
-    console.log('Beep detection: no beep found in audio');
+    console.log('Beep detection: no beep found despite '+rmsArr.length+' RMS windows analyzed');
     return null;
   }catch(e){
-    console.warn('Beep detection failed:',e);
+    console.error('Beep detection failed:',e);
     return null;
+  }
+}
+
+// Fallback: capture audio from video element by playing it through Web Audio API
+async function captureAudioFromVideo(ac,durationSec){
+  const savedTime=V.currentTime;
+  const savedPaused=V.paused;
+  V.currentTime=0;
+  V.muted=true;
+  const captureSr=22050;
+  const totalSamples=Math.ceil(captureSr*durationSec);
+  const offCtx=new OfflineAudioContext(1,totalSamples,captureSr);
+  try{
+    const source=offCtx.createMediaElementSource(V);
+    source.connect(offCtx.destination);
+    V.play();
+    const rendered=await offCtx.startRendering();
+    V.pause();V.muted=false;V.currentTime=savedTime;
+    if(!savedPaused)V.play();
+    return rendered;
+  }catch(e){
+    V.pause();V.muted=false;V.currentTime=savedTime;
+    throw e;
   }
 }
 
@@ -3098,11 +3180,47 @@ function calibrateSpeedFromWalls(flowData,wallTouches,beepT,blockT,dt){
 }
 
 // ===== SHOW TIMING EVENTS =====
+let settingBeepManually=false;
+function startManualBeep(){
+  settingBeepManually=true;
+  showSt('Click SET BEEP then step to the horn frame and click SET BEEP again, or press current frame','info');
+  // Change button to confirm mode
+  const btn=document.getElementById('set-beep-btn');
+  btn.textContent='USE THIS FRAME';
+  btn.style.background='#76ff03';
+  btn.onclick=function(){
+    beepTime=V.currentTime;
+    settingBeepManually=false;
+    btn.textContent='SET';
+    btn.style.background='#ff9800';
+    btn.style.display='none';
+    document.getElementById('tv-beep').textContent=fmT(beepTime);
+    // Recalculate block departure and reaction time
+    blockDepartTime=detectBlockDeparture(motionData,beepTime);
+    document.getElementById('tv-block').textContent=blockDepartTime>=0?fmT(blockDepartTime):'not found';
+    if(beepTime>=0&&blockDepartTime>=0){
+      const react=((blockDepartTime-beepTime)*1000).toFixed(0);
+      document.getElementById('tv-react').innerHTML=react+'<small>ms</small>';
+    }
+    showSt('Beep set to '+fmT(beepTime),'ready');
+    // Redraw graphs with new beep marker
+    drawGraph();drawMotionGraph();
+    // Re-run lap split calculations
+    if(wallTouches.length>0){
+      const dt=1/15;
+      flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,dt);
+      showTimingEvents();
+    }
+  };
+}
+
 function showTimingEvents(){
   const box=document.getElementById('timing-box');
   box.style.display='block';
 
   document.getElementById('tv-beep').textContent=beepTime>=0?fmT(beepTime):'not found';
+  // Show SET button when beep wasn't found so user can manually set it
+  document.getElementById('set-beep-btn').style.display=beepTime<0?'inline-block':'none';
   document.getElementById('tv-block').textContent=blockDepartTime>=0?fmT(blockDepartTime):'not found';
 
   if(beepTime>=0&&blockDepartTime>=0){
