@@ -202,6 +202,11 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
         </div>
         <span class="setup-unit" id="lap-dist"></span>
       </div>
+      <div class="setup-row">
+        <span class="setup-label">Official</span>
+        <input type="text" class="setup-input" id="official-time" placeholder="mm:ss.cc or ss.cc" style="width:90px" onchange="parseOfficialTime()">
+        <span class="setup-unit" id="official-info" style="color:#3a5a6a">← enter official time (optional)</span>
+      </div>
       <div class="setup-row" id="pool-mark-row" style="display:flex">
         <span class="setup-label">Walls</span>
         <button class="btn btn-sm" id="mark-start-btn" onclick="startMark('start')" style="font-size:10px">🏁 Tap Start Wall</button>
@@ -377,6 +382,7 @@ let detectedStroke='unknown',speedUnit='yd/s';
 let camMode='fixed'; // 'fixed' or 'follow'
 let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
 let beepTime=-1,blockDepartTime=-1,wallTouches=[],breakouts=null; // timing events
+let officialTime=-1; // official race time in seconds (beep to finish touch)
 let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
 let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width (legacy fallback)
 let selectingLane=false;
@@ -855,6 +861,94 @@ function updateSetup(){
   if(scanned){drawGraph();drawMotionGraph()}
 }
 
+function parseOfficialTime(){
+  const raw=document.getElementById('official-time').value.trim();
+  const info=document.getElementById('official-info');
+  if(!raw){officialTime=-1;info.textContent='← enter official time (optional)';info.style.color='#3a5a6a';return}
+  // Parse mm:ss.cc or ss.cc or ss
+  let secs=-1;
+  const mmss=raw.match(/^(\d+):(\d+(?:\.\d+)?)$/);
+  if(mmss){
+    secs=parseInt(mmss[1])*60+parseFloat(mmss[2]);
+  } else {
+    const ss=parseFloat(raw);
+    if(!isNaN(ss)&&ss>0) secs=ss;
+  }
+  if(secs>0){
+    officialTime=secs;
+    info.textContent='✓ '+secs.toFixed(2)+'s';info.style.color='#76ff03';
+    // If we already have scan results, validate/calibrate
+    if(scanned) validateOfficialTime();
+  } else {
+    officialTime=-1;
+    info.textContent='⚠ format: 26.22 or 1:06.45';info.style.color='#ff5252';
+  }
+}
+
+function validateOfficialTime(){
+  if(officialTime<=0) return;
+  const info=document.getElementById('official-info');
+  // Find finish time: last wall touch that qualifies
+  const startTime=blockDepartTime>0?blockDepartTime:(beepTime>0?beepTime:0);
+  const validWalls=wallTouches.filter(function(w){return w.time>startTime+0.5});
+
+  // For official time: measured from beep to finish touch
+  // Official time = finish_touch_time - beep_time
+  if(beepTime<0){
+    info.textContent='✓ '+officialTime.toFixed(2)+'s (no beep detected to compare)';info.style.color='#ffd740';
+    return;
+  }
+
+  // The last valid wall touch should be the finish
+  if(validWalls.length===0){
+    info.textContent='✓ '+officialTime.toFixed(2)+'s (no wall touches to compare)';info.style.color='#ffd740';
+    return;
+  }
+
+  const finishWall=validWalls[validWalls.length-1];
+  const measuredTime=finishWall.time-beepTime;
+  const diff=measuredTime-officialTime;
+  const absDiff=Math.abs(diff);
+
+  if(absDiff<0.15){
+    // Within 150ms — excellent match
+    info.innerHTML='✓ '+officialTime.toFixed(2)+'s — measured: '+measuredTime.toFixed(2)+'s <small style="color:#76ff03">(Δ '+diff.toFixed(2)+'s ✓)</small>';
+    info.style.color='#76ff03';
+  } else if(absDiff<0.5){
+    // Within 500ms — close
+    info.innerHTML='✓ '+officialTime.toFixed(2)+'s — measured: '+measuredTime.toFixed(2)+'s <small style="color:#ffd740">(Δ '+diff.toFixed(2)+'s)</small>';
+    info.style.color='#ffd740';
+  } else {
+    // More than 500ms off — beep or wall detection likely wrong
+    const direction=diff>0?'too late':'too early';
+    info.innerHTML='⚠ '+officialTime.toFixed(2)+'s — measured: '+measuredTime.toFixed(2)+'s <small style="color:#ff5252">(Δ '+diff.toFixed(2)+'s — beep or finish '+direction+')</small>';
+    info.style.color='#ff5252';
+
+    // Auto-correct beep time to match official time
+    // If measured is too long → beep was detected too early → shift beep later
+    // If measured is too short → beep was detected too late → shift beep earlier
+    const correctedBeep=finishWall.time-officialTime;
+    if(correctedBeep>=0&&correctedBeep<finishWall.time){
+      beepTime=correctedBeep;
+      // Recalculate reaction time
+      if(blockDepartTime>0){
+        const react=((blockDepartTime-beepTime)*1000).toFixed(0);
+        document.getElementById('tv-react').innerHTML=react+'<small>ms</small>';
+      }
+      document.getElementById('tv-beep').textContent=fmT(beepTime);
+      info.innerHTML='↻ Beep corrected to '+fmT(beepTime)+' (official: '+officialTime.toFixed(2)+'s, was off by '+diff.toFixed(2)+'s)';
+      info.style.color='#00e5ff';
+
+      // Recalibrate speed from walls with corrected beep
+      if(wallTouches.length>0){
+        flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,1/15);
+      }
+      showTimingEvents();
+      drawGraph();drawMotionGraph();
+    }
+  }
+}
+
 const V=document.getElementById('vid'),CW=document.getElementById('cw');
 const canvas=document.getElementById('draw-canvas'),ctx=canvas.getContext('2d');
 const gC=document.getElementById('graph-canvas'),gx=gC.getContext('2d');
@@ -1273,6 +1367,9 @@ async function scanVideo(){
 
   // Show timing events
   showTimingEvents();
+
+  // Validate against official time if entered
+  if(officialTime>0) validateOfficialTime();
 
   // ===== FIND PEAKS & STATS =====
   let peakSpd=0,peakTime=0,avgSpd=0;
