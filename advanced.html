@@ -382,6 +382,7 @@ let detectedStroke='unknown',speedUnit='yd/s';
 let camMode='fixed'; // 'fixed' or 'follow'
 let poolStartX=-1,poolFarX=-1,markingWall=null; // start wall (blocks) and far wall (turn end)
 let beepTime=-1,blockDepartTime=-1,wallTouches=[],breakouts=null; // timing events
+let laneMotionEnergy=[]; // per-frame lane motion energy for event-based wall detection
 let officialTime=-1; // official race time in seconds (beep to finish touch)
 let laneY=-1,laneH=0.20; // side view: horizontal band center Y (0-1) and half-height
 let laneX=-1,laneW=0.12; // end-on view: vertical band center X (0-1) and half-width (legacy fallback)
@@ -1075,6 +1076,7 @@ async function scanVideo(){
 
   let prevFrame=null,prevCenter=null,prevTopData=null,prevStrips=null;
   const rawDisplacements=[],rawMotion=[];
+  laneMotionEnergy=[]; // per-frame total motion energy within lane bounds (for wall detection)
   const progress=document.getElementById('scan-progress');
 
   for(let i=0;i<=totalSamples;i++){
@@ -1149,6 +1151,11 @@ async function scanVideo(){
               motionProfile[bi]=pxCount>0?rowMotion/pxCount:0;
               colorProfile[bi]=pxCount>0?rowColor/pxCount:0;
             }
+
+            // Record total lane motion energy for this frame (wall detection uses this)
+            let totalLaneEnergy=0;
+            for(let bi=0;bi<numBins;bi++) totalLaneEnergy+=motionProfile[bi];
+            laneMotionEnergy.push({time:t,energy:numBins>0?totalLaneEnergy/numBins:0});
 
             // Smooth the profiles (±3 bins)
             const smooth=function(arr){
@@ -1271,6 +1278,8 @@ async function scanVideo(){
             }
             const swimmerX=motionTotal>0?motionWX/motionTotal:sw/2;
             rawDisplacements.push({time:t,posX:swimmerX/sw});
+            const nPxSide=((yEnd-yStart)/step)*(sw/step);
+            laneMotionEnergy.push({time:t,energy:nPxSide>0?motionTotal/nPxSide:0});
           }
         }
         prevFrame=new Uint8ClampedArray(frameData);
@@ -2060,7 +2069,7 @@ function resetVideo(){
   V.pause();V.removeAttribute('src');V.load();
 
   // Clear all data
-  flowData=[];motionData=[];dStrokes=[];cStroke=[];
+  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];
   scanning=false;scanned=false;videoReady=false;playing=false;
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
@@ -2243,11 +2252,61 @@ async function detectBeep(){
   }
 }
 
-// ===== WALL TURN DETECTION from position data =====
+// ===== WALL TURN DETECTION — EVENT-BASED (motion energy dips) =====
+// Primary: detect dips in lane motion energy (swimmer pauses at wall)
+// Secondary: confirm with velocity reversal from position data
+// This approach is zoom-robust: motion energy drops when swimmer stops,
+// regardless of camera zoom/pan.
 function detectWallTurns(rawDisplacements,sampleFps){
   if((camMode!=='fixed'&&camMode!=='endon')||rawDisplacements.length<20)return [];
 
-  // Smooth positions heavily for wall detection
+  const lapLen=getLapLen();
+  const minTimeBetweenTurns=lapLen>=50?18:10; // seconds
+  const minTimeToFirstWall=lapLen>=50?20:10;
+  const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
+
+  // === PRIMARY: Motion energy dip detection ===
+  // Smooth lane motion energy with wide window
+  const eArr=laneMotionEnergy.map(function(d){return d.energy});
+  const eSmoothR=5; // ±5 frames (~0.67s at 15fps)
+  const eSmooth=eArr.map(function(_,i){
+    const lo=Math.max(0,i-eSmoothR),hi=Math.min(eArr.length-1,i+eSmoothR);
+    let s=0,c=0;for(let j=lo;j<=hi;j++){s+=eArr[j];c++}
+    return s/c;
+  });
+
+  // Compute swimming baseline: median of the top 50% of energy values
+  // (excludes turns/starts where energy is low)
+  const eSorted=eSmooth.slice().sort(function(a,b){return a-b});
+  const swimBaseline=eSorted[Math.floor(eSorted.length*0.75)]||1;
+  // A wall touch = energy drops below 40% of swimming baseline for ≥2 frames
+  const dipThresh=swimBaseline*0.40;
+
+  // Find dip regions (low energy = swimmer at wall)
+  const dipRegions=[];
+  let inDip=false,dipStart=-1;
+  for(let i=0;i<eSmooth.length;i++){
+    const t=laneMotionEnergy[i]?laneMotionEnergy[i].time:i/sampleFps;
+    if(t-raceStart<minTimeToFirstWall) continue;
+    if(eSmooth[i]<dipThresh){
+      if(!inDip){inDip=true;dipStart=i}
+    } else {
+      if(inDip){
+        // Dip ended — find the minimum energy point as the wall touch time
+        let minE=Infinity,minI=dipStart;
+        for(let j=dipStart;j<i;j++){
+          if(eSmooth[j]<minE){minE=eSmooth[j];minI=j}
+        }
+        const dipTime=laneMotionEnergy[minI]?laneMotionEnergy[minI].time:minI/sampleFps;
+        if(dipRegions.length===0||dipTime-dipRegions[dipRegions.length-1].time>minTimeBetweenTurns){
+          dipRegions.push({time:dipTime,index:minI,energy:minE});
+        }
+        inDip=false;
+      }
+    }
+  }
+
+  // === SECONDARY: Position-based velocity reversals (fallback/supplement) ===
   const posArr=rawDisplacements.map(function(d){return d.posX});
   const smoothR=6;
   const smoothPos=posArr.map(function(_,i){
@@ -2258,80 +2317,58 @@ function detectWallTurns(rawDisplacements,sampleFps){
     return w.reduce(function(a,b){return a+b},0)/w.length;
   });
 
-  // Find direction reversals: swimmer reaches wall and turns
   const vel=[];
-  for(let i=1;i<smoothPos.length;i++){
-    vel.push(smoothPos[i]-smoothPos[i-1]);
-  }
-
-  // Smooth velocity
+  for(let i=1;i<smoothPos.length;i++) vel.push(smoothPos[i]-smoothPos[i-1]);
   const sVel=vel.map(function(_,i){
     const lo=Math.max(0,i-3),hi=Math.min(vel.length-1,i+3);
     let s=0,c=0;for(let j=lo;j<=hi;j++){s+=vel[j];c++}
     return s/c;
   });
 
-  // Find zero-crossings of velocity (direction changes)
+  // === MERGE: use motion dips as primary, position reversals as confirmation ===
   const rawTurns=[];
-  // Minimum time between wall touches depends on pool length:
-  // 25yd SCY: world record 50 free ~18s / 2 laps = ~9s per lap minimum
-  // 25m SCM: similar. 50m LCM: ~20s per lap minimum.
-  // Use a generous minimum: at least 7 seconds between turns for short course,
-  // 15 seconds for long course. This prevents false detections from splash/noise.
-  const lapLen=getLapLen();
-  const minTimeBetweenTurns=lapLen>=50?18:10; // seconds (25yd lap ~10s min for elite)
   const minGap=Math.floor(sampleFps*minTimeBetweenTurns);
-  let lastTurnI=-minGap*2;
+  let lastTurnTime=-minTimeBetweenTurns*2;
 
-  // Minimum displacement threshold: higher for endon mode where perspective
-  // causes small position jitter that looks like direction changes
-  const minDisplacement=camMode==='endon'?0.12:0.05;
-
-  // Don't detect any turns before the swimmer could realistically reach a wall
-  // Fastest possible: ~2.3 m/s sustained → 25yd (22.86m) in ~10s including start
-  // Use conservative minimums from video start (not block depart, since we may not have that yet)
-  const minTimeToFirstWall=lapLen>=50?20:10; // seconds from video start (fastest 25yd ~10s)
-  const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
-
-  // For endon mode: find position extremes to validate wall touches
-  // A real wall touch should be near the top or bottom of the swimmer's range,
-  // not in the middle of the pool
-  let posMin=Infinity,posMax=-Infinity;
-  for(let i=0;i<smoothPos.length;i++){
-    if(smoothPos[i]<posMin) posMin=smoothPos[i];
-    if(smoothPos[i]>posMax) posMax=smoothPos[i];
+  if(dipRegions.length>0){
+    // Use motion dips as primary wall detection
+    dipRegions.forEach(function(dip){
+      if(dip.time-lastTurnTime<minTimeBetweenTurns) return;
+      // Find nearest position for this dip time
+      let bestI=0,bestDt=Infinity;
+      for(let i=0;i<rawDisplacements.length;i++){
+        const dt=Math.abs(rawDisplacements[i].time-dip.time);
+        if(dt<bestDt){bestDt=dt;bestI=i}
+      }
+      rawTurns.push({
+        time:dip.time,
+        posX:bestI<smoothPos.length?smoothPos[bestI]:0.5,
+        index:bestI
+      });
+      lastTurnTime=dip.time;
+    });
+    console.log('Wall detection: found '+rawTurns.length+' walls via motion energy dips (baseline='+swimBaseline.toFixed(1)+', thresh='+dipThresh.toFixed(1)+')');
   }
-  const posRange=posMax-posMin;
-  // Wall zone: outer 25% of the position range on each side
-  const wallZoneFrac=0.25;
-  const wallLo=posMin+posRange*wallZoneFrac;
-  const wallHi=posMax-posRange*wallZoneFrac;
 
-  for(let i=1;i<sVel.length;i++){
-    if(sVel[i]*sVel[i-1]<0 && (i-lastTurnI)>minGap){
-      // Skip if too early for a realistic wall touch
-      if(rawDisplacements[i].time-raceStart<minTimeToFirstWall) continue;
-
-      // In endon mode: require the turn position to be near the extremes
-      // (swimmer must actually be near a wall, not in mid-pool due to zoom artifact)
-      if(camMode==='endon' && posRange>0.05){
-        if(smoothPos[i]>wallLo && smoothPos[i]<wallHi) continue; // mid-pool, skip
-      }
-
-      const rangeStart=Math.max(0,lastTurnI);
-      let displacement=0;
-      for(let j=rangeStart+1;j<=i;j++){
-        displacement+=Math.abs(smoothPos[j]-smoothPos[j-1]);
-      }
-      if(displacement>minDisplacement){
-        rawTurns.push({
-          time:rawDisplacements[i].time,
-          posX:smoothPos[i],
-          index:i
-        });
-        lastTurnI=i;
+  // If motion dips found nothing, fall back to position reversals
+  if(rawTurns.length===0){
+    let lastTurnI=-minGap*2;
+    const minDisplacement=camMode==='endon'?0.12:0.05;
+    for(let i=1;i<sVel.length;i++){
+      if(sVel[i]*sVel[i-1]<0 && (i-lastTurnI)>minGap){
+        if(rawDisplacements[i].time-raceStart<minTimeToFirstWall) continue;
+        const rangeStart=Math.max(0,lastTurnI);
+        let displacement=0;
+        for(let j=rangeStart+1;j<=i;j++){
+          displacement+=Math.abs(smoothPos[j]-smoothPos[j-1]);
+        }
+        if(displacement>minDisplacement){
+          rawTurns.push({time:rawDisplacements[i].time,posX:smoothPos[i],index:i});
+          lastTurnI=i;
+        }
       }
     }
+    console.log('Wall detection: found '+rawTurns.length+' walls via position reversals (fallback)');
   }
 
   if(rawTurns.length===0)return [];
