@@ -2326,12 +2326,124 @@ function detectWallTurns(rawDisplacements,sampleFps){
   });
 
   // === MERGE: use motion dips as primary, position reversals as confirmation ===
-  const rawTurns=[];
   const minGap=Math.floor(sampleFps*minTimeBetweenTurns);
-  let lastTurnTime=-minTimeBetweenTurns*2;
 
   if(dipRegions.length>0){
-    // Use motion dips as primary wall detection
+    console.log('Wall detection: found '+dipRegions.length+' walls via motion energy dips (baseline='+swimBaseline.toFixed(1)+', thresh='+dipThresh.toFixed(1)+')');
+  }
+
+  // === FINISH DETECTION ===
+  // The finish is different from a turn: swimmer touches pad then floats/drifts.
+  // Energy drops from swimming level and NEVER recovers (unlike a turn where it does).
+  // Detect finish as the onset of permanent deceleration — the "knee" where energy
+  // transitions from swimming level to sustained low.
+  const expectedTurnsDip=numLaps-1; // total wall touches including finish
+  const detectedMidRaceTurns=dipRegions.length;
+
+  if(detectedMidRaceTurns>0 && detectedMidRaceTurns<expectedTurnsDip){
+    // We're missing walls — likely the finish. Try to detect it.
+    const lastTurn=dipRegions[dipRegions.length-1];
+    const lastTurnIdx=lastTurn.index;
+
+    // Search window: from minTimeBetweenTurns after last turn to end of data
+    const searchStartTime=lastTurn.time+minTimeBetweenTurns;
+    let searchStartIdx=-1;
+    for(let i=0;i<laneMotionEnergy.length;i++){
+      if(laneMotionEnergy[i].time>=searchStartTime){searchStartIdx=i;break}
+    }
+
+    if(searchStartIdx>=0 && searchStartIdx<eSmooth.length-5){
+      // Look for the "knee" — the last frame at or near swimming baseline
+      // before energy drops permanently below a recovery threshold.
+      // Recovery threshold: if energy stays below 60% of baseline for the
+      // remainder of the race, swimmer has finished.
+      const finishDropThresh=swimBaseline*0.60;
+      const sustainedFrames=Math.max(Math.floor(sampleFps*2),10); // must stay low for ≥2s
+
+      let finishIdx=-1;
+      for(let i=searchStartIdx;i<eSmooth.length-sustainedFrames;i++){
+        if(eSmooth[i]<finishDropThresh){
+          // Check: does energy stay below threshold for the rest of the data
+          // (or at least sustainedFrames)?
+          let staysLow=true;
+          const checkEnd=Math.min(i+sustainedFrames,eSmooth.length);
+          for(let j=i;j<checkEnd;j++){
+            if(eSmooth[j]>=swimBaseline*0.75){staysLow=false;break}
+          }
+          if(staysLow){
+            // Found the permanent drop. Now walk backward to find the onset —
+            // the last frame that was still at swimming energy (the pad touch).
+            let onsetIdx=i;
+            for(let k=i-1;k>=Math.max(searchStartIdx,i-Math.floor(sampleFps*3));k--){
+              if(eSmooth[k]>=finishDropThresh){
+                onsetIdx=k;
+                break;
+              }
+            }
+            finishIdx=onsetIdx;
+            break;
+          }
+        }
+      }
+
+      if(finishIdx>=0){
+        const finishTime=laneMotionEnergy[finishIdx]?laneMotionEnergy[finishIdx].time:finishIdx/sampleFps;
+        // Only add if it's far enough from the last turn
+        if(finishTime-lastTurn.time>=minTimeBetweenTurns){
+          dipRegions.push({time:finishTime,index:finishIdx,energy:eSmooth[finishIdx],isFinish:true});
+          console.log('Finish detection: pad touch at '+finishTime.toFixed(2)+'s (onset of permanent deceleration, energy='+eSmooth[finishIdx].toFixed(1)+' vs baseline='+swimBaseline.toFixed(1)+')');
+        }
+      } else {
+        console.log('Finish detection: could not find permanent deceleration after last turn at '+lastTurn.time.toFixed(2)+'s');
+      }
+    }
+  } else if(detectedMidRaceTurns===0){
+    // No dips at all — for short races (50 SCY = 2 laps, 1 expected wall = finish only)
+    // Try to detect the finish as the onset of permanent deceleration from swimming level
+    const searchStartTime=raceStart+minTimeToFirstWall;
+    let searchStartIdx=-1;
+    for(let i=0;i<laneMotionEnergy.length;i++){
+      if(laneMotionEnergy[i].time>=searchStartTime){searchStartIdx=i;break}
+    }
+
+    if(searchStartIdx>=0 && expectedTurnsDip===1){
+      // Single-lap race to far wall (e.g., 50 SCY). Only wall = finish.
+      const finishDropThresh=swimBaseline*0.60;
+      const sustainedFrames=Math.max(Math.floor(sampleFps*2),10);
+
+      let finishIdx=-1;
+      for(let i=searchStartIdx;i<eSmooth.length-sustainedFrames;i++){
+        if(eSmooth[i]<finishDropThresh){
+          let staysLow=true;
+          const checkEnd=Math.min(i+sustainedFrames,eSmooth.length);
+          for(let j=i;j<checkEnd;j++){
+            if(eSmooth[j]>=swimBaseline*0.75){staysLow=false;break}
+          }
+          if(staysLow){
+            let onsetIdx=i;
+            for(let k=i-1;k>=Math.max(searchStartIdx,i-Math.floor(sampleFps*3));k--){
+              if(eSmooth[k]>=finishDropThresh){onsetIdx=k;break}
+            }
+            finishIdx=onsetIdx;
+            break;
+          }
+        }
+      }
+
+      if(finishIdx>=0){
+        const finishTime=laneMotionEnergy[finishIdx]?laneMotionEnergy[finishIdx].time:finishIdx/sampleFps;
+        dipRegions.push({time:finishTime,index:finishIdx,energy:eSmooth[finishIdx],isFinish:true});
+        console.log('Finish detection (no-turn race): pad touch at '+finishTime.toFixed(2)+'s');
+      }
+    }
+  }
+
+  // === BUILD rawTurns from dipRegions (now possibly including finish) ===
+  const rawTurns=[];
+  let lastTurnTime=-minTimeBetweenTurns*2;
+  if(dipRegions.length>0){
+    // Sort by time (finish may have been appended out of order)
+    dipRegions.sort(function(a,b){return a.time-b.time});
     dipRegions.forEach(function(dip){
       if(dip.time-lastTurnTime<minTimeBetweenTurns) return;
       // Find nearest position for this dip time
@@ -2343,14 +2455,15 @@ function detectWallTurns(rawDisplacements,sampleFps){
       rawTurns.push({
         time:dip.time,
         posX:bestI<smoothPos.length?smoothPos[bestI]:0.5,
-        index:bestI
+        index:bestI,
+        isFinish:!!dip.isFinish
       });
       lastTurnTime=dip.time;
     });
-    console.log('Wall detection: found '+rawTurns.length+' walls via motion energy dips (baseline='+swimBaseline.toFixed(1)+', thresh='+dipThresh.toFixed(1)+')');
+    console.log('Wall detection total: '+rawTurns.length+' walls ('+rawTurns.filter(function(t){return t.isFinish}).length+' finish)');
   }
 
-  // If motion dips found nothing, fall back to position reversals
+  // If motion dips found nothing (and finish detection didn't either), fall back to position reversals
   if(rawTurns.length===0){
     let lastTurnI=-minGap*2;
     const minDisplacement=camMode==='endon'?0.12:0.05;
@@ -2435,12 +2548,18 @@ function detectWallTurns(rawDisplacements,sampleFps){
     // For now, store the raw index range for later processing
     const nextTurnI=ti<rawTurns.length-1?rawTurns[ti+1].index:smoothPos.length-1;
 
+    // Check if this is the finish touch (last wall, marked by finish detection)
+    const isFinish=t.isFinish||(ti===rawTurns.length-1 && ti===expectedTurns-1);
+    const wallType=isStartWall?'start':'far';
+    const wallLabel=isFinish?'Finish':(isStartWall?'Start Wall':'Far Wall');
+
     return{
       time:t.time,
       posX:t.posX,
       index:t.index,
-      wall:isStartWall?'start':'far',
-      label:isStartWall?'Start Wall':'Far Wall',
+      wall:wallType,
+      label:wallLabel,
+      isFinish:isFinish,
       // Turn analysis fields
       wallX:wallX,
       flagX:flagX,
@@ -2763,6 +2882,7 @@ function showTimingEvents(){
         const approach=((w.time-w.flagTime)).toFixed(2);
         extra=' <small style="color:#ffd740">flags→wall '+approach+'s</small>';
       }
+      if(w.isFinish) el.style.borderLeft='3px solid #4caf50';
       el.innerHTML=wallLabel+' <small>#'+(i+1)+'</small>: '+fmT(w.time)+extra;
       el.onclick=function(){V.currentTime=w.time;V.pause();updateHUD();drawGraph();drawMotionGraph()};
       row.appendChild(el);
