@@ -481,18 +481,24 @@ function getVideoRenderRect(){
   else{const rW=rect.height*vidAR;return{x:(rect.width-rW)/2,y:0,w:rW,h:rect.height}}
 }
 
+// Camera motion compensation: cumulative shift from zoom/pan during scan
+let cameraShiftX=0, cameraShiftY=0; // accumulated shift in normalized coords (0-1)
+
 // Get lane X boundaries at a given Y (0-1) using the two rope lines
+// Applies camera motion compensation when available
 // Returns {xLeft, xRight} in 0-1 coords, or null if no perspective lane defined
 function getLaneBoundsAtY(yNorm){
   if(!ropeLeft||!ropeRight) return null;
+  // Apply camera shift compensation: adjust Y query to account for frame shift
+  const adjY=yNorm-cameraShiftY;
   // Interpolate X along left rope line at this Y
   const lDy=ropeLeft.y2-ropeLeft.y1;
-  const lT=lDy!==0?(yNorm-ropeLeft.y1)/lDy:0.5;
-  const xL=ropeLeft.x1+lT*(ropeLeft.x2-ropeLeft.x1);
+  const lT=lDy!==0?(adjY-ropeLeft.y1)/lDy:0.5;
+  const xL=ropeLeft.x1+lT*(ropeLeft.x2-ropeLeft.x1)+cameraShiftX;
   // Interpolate X along right rope line at this Y
   const rDy=ropeRight.y2-ropeRight.y1;
-  const rT=rDy!==0?(yNorm-ropeRight.y1)/rDy:0.5;
-  const xR=ropeRight.x1+rT*(ropeRight.x2-ropeRight.x1);
+  const rT=rDy!==0?(adjY-ropeRight.y1)/rDy:0.5;
+  const xR=ropeRight.x1+rT*(ropeRight.x2-ropeRight.x1)+cameraShiftX;
   return {xLeft:Math.min(xL,xR), xRight:Math.max(xL,xR)};
 }
 
@@ -1077,6 +1083,7 @@ async function scanVideo(){
   let prevFrame=null,prevCenter=null,prevTopData=null,prevStrips=null;
   const rawDisplacements=[],rawMotion=[];
   laneMotionEnergy=[]; // per-frame total motion energy within lane bounds (for wall detection)
+  cameraShiftX=0;cameraShiftY=0; // reset camera motion compensation
   const progress=document.getElementById('scan-progress');
 
   for(let i=0;i<=totalSamples;i++){
@@ -1193,6 +1200,58 @@ async function scanVideo(){
             if(motionSpread>0.50 && rawDisplacements.length>0){
               // Camera zoom/pan detected — hold previous position
               rawDisplacements.push({time:t,posX:rawDisplacements[rawDisplacements.length-1].posX});
+
+              // Estimate global camera shift for lane compensation
+              // Compare vertical strips of current vs previous frame to find best Y offset
+              // Sample a column near center of lane
+              const sampleX=Math.floor(sw*0.5);
+              const stripW=Math.floor(sw*0.05); // narrow vertical strip
+              const maxShiftPx=Math.floor(sh*0.08); // search up to 8% of frame
+              let bestShift=0,bestCorr=Infinity;
+              for(let dy=-maxShiftPx;dy<=maxShiftPx;dy+=step){
+                let sad=0,cnt=0;
+                for(let y=Math.max(0,-dy);y<Math.min(sh,sh-dy);y+=step*3){
+                  for(let x=sampleX;x<Math.min(sampleX+stripW,sw);x+=step*2){
+                    const idx1=(y*sw+x)*4;
+                    const idx2=((y+dy)*sw+x)*4;
+                    if(idx1>=0&&idx2>=0&&idx1<frameData.length-3&&idx2<prevFrame.length-3){
+                      sad+=Math.abs(frameData[idx1]-prevFrame[idx2])
+                          +Math.abs(frameData[idx1+1]-prevFrame[idx2+1])
+                          +Math.abs(frameData[idx1+2]-prevFrame[idx2+2]);
+                      cnt++;
+                    }
+                  }
+                }
+                if(cnt>0){sad/=cnt;if(sad<bestCorr){bestCorr=sad;bestShift=dy}}
+              }
+              // Also estimate X shift with a horizontal strip
+              const sampleY=Math.floor(sh*0.7); // near bottom of pool area
+              const stripH=Math.floor(sh*0.05);
+              let bestShiftX=0,bestCorrX=Infinity;
+              for(let dx=-maxShiftPx;dx<=maxShiftPx;dx+=step){
+                let sad=0,cnt=0;
+                for(let x=Math.max(0,-dx);x<Math.min(sw,sw-dx);x+=step*3){
+                  for(let y=sampleY;y<Math.min(sampleY+stripH,sh);y+=step*2){
+                    const idx1=(y*sw+x)*4;
+                    const idx2=(y*sw+(x+dx))*4;
+                    if(idx1>=0&&idx2>=0&&idx1<frameData.length-3&&idx2<prevFrame.length-3){
+                      sad+=Math.abs(frameData[idx1]-prevFrame[idx2])
+                          +Math.abs(frameData[idx1+1]-prevFrame[idx2+1])
+                          +Math.abs(frameData[idx1+2]-prevFrame[idx2+2]);
+                      cnt++;
+                    }
+                  }
+                }
+                if(cnt>0){sad/=cnt;if(sad<bestCorrX){bestCorrX=sad;bestShiftX=dx}}
+              }
+              // Accumulate shift in normalized coords
+              cameraShiftY+=bestShift/sh;
+              cameraShiftX+=bestShiftX/sw;
+              // Also adjust waterYmin/waterYmax to track the shifting pool
+              waterYmin+=bestShift/sh;
+              waterYmax+=bestShift/sh;
+              waterYmin=Math.max(0,Math.min(1,waterYmin));
+              waterYmax=Math.max(0,Math.min(1,waterYmax));
             } else {
 
             // Determine swim direction from previous positions to find leading edge
@@ -1483,7 +1542,12 @@ async function scanVideo(){
 
   // ===== WALL TURN DETECTION =====
   document.getElementById('scan-st').textContent='Finding wall turns...';
-  wallTouches=detectWallTurns(rawDisplacements,sampleFps);
+  try{
+    wallTouches=detectWallTurns(rawDisplacements,sampleFps);
+  }catch(e){
+    console.error('Wall detection error:',e);
+    wallTouches=[];
+  }
 
   // ===== BLOCK DEPARTURE =====
   blockDepartTime=detectBlockDeparture(motionData,beepTime);
@@ -2069,7 +2133,7 @@ function resetVideo(){
   V.pause();V.removeAttribute('src');V.load();
 
   // Clear all data
-  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];
+  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];cameraShiftX=0;cameraShiftY=0;
   scanning=false;scanned=false;videoReady=false;playing=false;
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
