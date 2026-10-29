@@ -504,17 +504,23 @@ function startMark(side){
 function handlePoolMark(e){
   if(!markingWall)return;
   const coords=clickToVideoFrac(e);
-  const xPct=coords.x; // 0-1 in video frame
+  // In endon mode, walls are at top/bottom (Y axis), not left/right (X axis)
+  const wallPos=camMode==='endon'?coords.y:coords.x;
   if(markingWall==='start'){
-    poolStartX=xPct;
-    document.getElementById('mark-start-val').textContent=Math.round(xPct*100)+'%';
+    poolStartX=wallPos;
+    document.getElementById('mark-start-val').textContent=Math.round(wallPos*100)+'%';
     document.getElementById('mark-start-btn').textContent='🏁 Start Wall';document.getElementById('mark-start-btn').style.color='';
+    // In endon mode, also update waterYmax to the start wall (near camera = bottom)
+    if(camMode==='endon') waterYmax=Math.min(1,wallPos+0.02);
   } else {
-    poolFarX=xPct;
-    document.getElementById('mark-far-val').textContent=Math.round(xPct*100)+'%';
+    poolFarX=wallPos;
+    document.getElementById('mark-far-val').textContent=Math.round(wallPos*100)+'%';
     document.getElementById('mark-far-btn').textContent='Far Wall ✓';document.getElementById('mark-far-btn').style.color='';
+    // In endon mode, also update waterYmin to the far wall (away from camera = top)
+    if(camMode==='endon') waterYmin=Math.max(0,wallPos-0.02);
   }
   markingWall=null;
+  drawLaneOverlay(); // redraw with updated bounds
   updateSetup();
 }
 function startLaneSelect(){
@@ -661,8 +667,11 @@ function handleLaneSelect(e){
     const allTapYs=ropeTaps.map(function(p){return p.y});
     const tapYmin=Math.min.apply(null,allTapYs);
     const tapYmax=Math.max.apply(null,allTapYs);
-    const yMargin=(tapYmax-tapYmin)*0.1;
-    waterYmin=Math.max(0,tapYmin-yMargin);
+    // Only extend DOWNWARD (toward camera) with margin, not upward (toward vanishing pt).
+    // The highest rope tap is approximately the far wall — extending above it
+    // pushes the trapezoid into sky/trees beyond the pool.
+    const yMargin=(tapYmax-tapYmin)*0.05;
+    waterYmin=Math.max(0,tapYmin); // no extension above highest tap
     waterYmax=Math.min(1,tapYmax+yMargin);
     const midY=(waterYmin+waterYmax)/2;
     const midBounds=getLaneBoundsAtY(midY);
@@ -1218,8 +1227,6 @@ async function scanVideo(){
               swimmerY=peakY;
             }
 
-            // Temporal smoothing: EMA with α=0.5
-            const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*waterRange:-1;
             // Normalize position to WATER BOUNDS, not frame height.
             // swimmerY is in pixel coords within [waterYmin*sh, waterYmax*sh].
             // Map to [0,1] within visible pool area so position is independent of
@@ -1227,6 +1234,8 @@ async function scanVideo(){
             const waterTop=waterYmin*sh;
             const waterBot=waterYmax*sh;
             const waterRange=Math.max(waterBot-waterTop,1);
+            // Temporal smoothing: EMA with α=0.5
+            const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*waterRange:-1;
             if(prevPosY>=0){
               // Limit max jump per frame to 10% of water range
               const maxJump=waterRange*0.10;
