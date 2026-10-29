@@ -2093,40 +2093,7 @@ async function detectBeep(){
     }
     if(rmsArr.length<20)return null;
 
-    // ===== METHOD 2: Tonal energy (horn/beep frequency band 400-4000Hz) =====
-    // A swim meet horn is a sustained tonal signal, distinct from broadband crowd noise.
-    // Compute band-pass energy to isolate it.
-    const fftSize=1024;
-    const fftHop=Math.floor(sr*0.01); // 10ms hop
-    const hann=new Float32Array(fftSize);
-    for(let i=0;i<fftSize;i++) hann[i]=0.5*(1-Math.cos(2*Math.PI*i/(fftSize-1)));
-    const tonalArr=[];
-    for(let start=0;start+fftSize<=raw.length;start+=fftHop){
-      // Apply window and compute power spectrum via autocorrelation proxy
-      // (simpler than full FFT: sum energy in target band using Goertzel-like approach)
-      // Actually, use a simple band-pass energy ratio: energy in 400-4000Hz vs total
-      let totalE=0, bandE=0;
-      // Approximate: count zero-crossings and energy. High ZCR = high freq.
-      // Better: compute spectral centroid proxy via energy of high-pass filtered signal
-      let hpE=0;
-      let prev=0;
-      for(let i=start;i<start+fftSize;i++){
-        const s=raw[i]*hann[i-start];
-        totalE+=s*s;
-        // Simple 1st-order high-pass at ~300Hz: y[n] = x[n] - x[n-1] (differentiation)
-        const hp=s-prev;
-        prev=s;
-        hpE+=hp*hp;
-      }
-      // Tonal score: if the high-pass energy is high AND total energy is high,
-      // it's likely a horn/beep (not just crowd rumble which is low-freq dominant)
-      const hpRatio=totalE>0?hpE/totalE:0;
-      const rms=Math.sqrt(totalE/fftSize);
-      // Tonal score combines volume with high-frequency content
-      tonalArr.push({time:start/sr, rms:rms, hpRatio:hpRatio, tonal:rms*Math.min(hpRatio,2)});
-    }
-
-    // Log first 2 seconds for debugging
+    // Log first 3 seconds for debugging
     var dbgStr='Beep detect RMS (first 3s): ';
     for(var di=0;di<rmsArr.length&&rmsArr[di].time<3;di+=5){
       dbgStr+=rmsArr[di].time.toFixed(2)+':'+rmsArr[di].rms.toFixed(4)+' ';
@@ -2135,79 +2102,79 @@ async function detectBeep(){
 
     let beepStart=-1;
 
-    // ===== STRATEGY A: Sliding-window onset detection =====
-    // Instead of fixed 200ms baseline, use a sliding comparison:
-    // for each point, compare current RMS to the RMS 100-300ms before it.
-    // A beep creates a sharp onset ratio (current/previous >> 1).
-    var bestOnsetIdx=-1, bestOnsetRatio=0;
-    var searchEnd3s=rmsArr.length;
-    for(var si=0;si<rmsArr.length;si++){if(rmsArr[si].time>5){searchEnd3s=si;break}}
+    // ===== STRATEGY A: Fixed baseline (original, proven method) =====
+    // Use the first 200ms as quiet baseline, find first onset after it.
+    // This works well when the video starts during "take your marks" silence.
+    var baseEndIdx=0;
+    for(var bi=0;bi<rmsArr.length;bi++){
+      if(rmsArr[bi].time>0.2){baseEndIdx=bi;break}
+      baseEndIdx=bi;
+    }
+    var baseSum=0;
+    for(var bi2=0;bi2<baseEndIdx;bi2++) baseSum+=rmsArr[bi2].rms;
+    var baselineRms=baseEndIdx>0?baseSum/baseEndIdx:0;
 
-    for(var oi=10;oi<searchEnd3s;oi++){
-      // Average RMS in the 100-300ms window before this point
-      var prevStart=Math.max(0,oi-30); // ~300ms before
-      var prevEnd=Math.max(0,oi-10);   // ~100ms before
-      if(prevEnd<=prevStart)continue;
-      var prevRms=0;
-      for(var pi=prevStart;pi<prevEnd;pi++) prevRms+=rmsArr[pi].rms;
-      prevRms/=(prevEnd-prevStart);
+    // Peak RMS in the first 5 seconds
+    var peakRms=0, peakIdx=-1;
+    var searchLimitIdx=rmsArr.length;
+    for(var si=0;si<rmsArr.length;si++){if(rmsArr[si].time>5){searchLimitIdx=si;break}}
+    for(var pi=baseEndIdx;pi<searchLimitIdx;pi++){
+      if(rmsArr[pi].rms>peakRms){peakRms=rmsArr[pi].rms;peakIdx=pi}
+    }
 
-      // Average RMS at this point and 30ms after
-      var curEnd=Math.min(rmsArr.length,oi+3);
-      var curRms=0;
-      for(var ci=oi;ci<curEnd;ci++) curRms+=rmsArr[ci].rms;
-      curRms/=(curEnd-oi);
+    // Threshold: 40% of the way from baseline to peak, but at least 1.5× baseline
+    var beepThresh=Math.max(baselineRms*1.5, baselineRms+(peakRms-baselineRms)*0.4);
+    // For very quiet baselines, use absolute minimum
+    if(baselineRms<0.001) beepThresh=Math.max(0.002, peakRms*0.15);
 
-      if(prevRms>0.0001){
-        var ratio=curRms/prevRms;
-        // Must be sustained for ≥30ms
-        if(ratio>2.0 && curRms>0.005){
-          var sustained=0;
-          for(var si2=oi;si2<Math.min(oi+5,rmsArr.length);si2++){
-            if(rmsArr[si2].rms>prevRms*1.5) sustained++;
-          }
-          if(sustained>=3 && ratio>bestOnsetRatio){
-            bestOnsetRatio=ratio;
-            bestOnsetIdx=oi;
-          }
+    console.log('Beep detect: baseline(0-200ms):',baselineRms.toFixed(5),
+      'peak(0.2-5s):',peakRms.toFixed(5),'at',peakIdx>=0?rmsArr[peakIdx].time.toFixed(3):'?',
+      'thresh:',beepThresh.toFixed(5));
+
+    // Find first sustained crossing
+    var runLen=0;
+    for(var fi=baseEndIdx;fi<searchLimitIdx;fi++){
+      if(rmsArr[fi].rms>beepThresh){
+        runLen++;
+        if(runLen>=3){
+          beepStart=fi-runLen+1;
+          console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3)+'s via baseline method');
+          break;
         }
-      }
+      } else { runLen=0; }
     }
 
-    if(bestOnsetIdx>=0 && bestOnsetRatio>3.0){
-      beepStart=bestOnsetIdx;
-      console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3)+'s via onset ratio ('+bestOnsetRatio.toFixed(1)+'x)');
-    }
-
-    // ===== STRATEGY B: Tonal spike detection =====
-    // Find the strongest tonal onset in first 5 seconds (horn/beep is tonal, crowd is noise)
+    // ===== STRATEGY B: Sliding-window onset detection =====
+    // For noisy recordings where the first 200ms isn't quiet
     if(beepStart<0){
-      var bestTonalIdx=-1, bestTonalScore=0;
-      var tSearchEnd=tonalArr.length;
-      for(var ti=0;ti<tonalArr.length;ti++){if(tonalArr[ti].time>5){tSearchEnd=ti;break}}
-
-      // Baseline tonal from first 200ms
-      var tBaseEnd=0;
-      for(var tbi=0;tbi<tonalArr.length;tbi++){if(tonalArr[tbi].time>0.2){tBaseEnd=tbi;break}}
-      var tBaseline=0;
-      for(var tbi2=0;tbi2<tBaseEnd;tbi2++) tBaseline+=tonalArr[tbi2].tonal;
-      tBaseline=tBaseEnd>0?tBaseline/tBaseEnd:0;
-
-      for(var ti2=tBaseEnd;ti2<tSearchEnd;ti2++){
-        var tScore=tonalArr[ti2].tonal;
-        if(tScore>tBaseline*2.5 && tScore>bestTonalScore){
-          // Verify sustained
-          var tSust=0;
-          for(var ts=ti2;ts<Math.min(ti2+5,tonalArr.length);ts++){
-            if(tonalArr[ts].tonal>tBaseline*1.5) tSust++;
+      var bestOnsetIdx=-1, bestOnsetRatio=0;
+      for(var oi=10;oi<searchLimitIdx;oi++){
+        var prevStart2=Math.max(0,oi-30);
+        var prevEnd2=Math.max(0,oi-10);
+        if(prevEnd2<=prevStart2)continue;
+        var prevRms2=0;
+        for(var pi2=prevStart2;pi2<prevEnd2;pi2++) prevRms2+=rmsArr[pi2].rms;
+        prevRms2/=(prevEnd2-prevStart2);
+        var curEnd2=Math.min(rmsArr.length,oi+3);
+        var curRms2=0;
+        for(var ci=oi;ci<curEnd2;ci++) curRms2+=rmsArr[ci].rms;
+        curRms2/=(curEnd2-oi);
+        if(prevRms2>0.0001){
+          var ratio=curRms2/prevRms2;
+          if(ratio>1.8 && curRms2>0.003){
+            var sustained=0;
+            for(var si2=oi;si2<Math.min(oi+5,rmsArr.length);si2++){
+              if(rmsArr[si2].rms>prevRms2*1.3) sustained++;
+            }
+            if(sustained>=3 && ratio>bestOnsetRatio){
+              bestOnsetRatio=ratio;bestOnsetIdx=oi;
+            }
           }
-          if(tSust>=3){bestTonalScore=tScore;bestTonalIdx=ti2}
         }
       }
-      if(bestTonalIdx>=0){
-        beepStart=bestTonalIdx;
-        console.log('Beep: found at',tonalArr[bestTonalIdx].time.toFixed(3)+'s via tonal detection');
-        return tonalArr[bestTonalIdx].time;
+      if(bestOnsetIdx>=0 && bestOnsetRatio>2.0){
+        beepStart=bestOnsetIdx;
+        console.log('Beep: found at',rmsArr[beepStart].time.toFixed(3)+'s via onset ratio ('+bestOnsetRatio.toFixed(1)+'x)');
       }
     }
 
@@ -2220,13 +2187,12 @@ async function detectBeep(){
         var bef=(rmsArr[ji-3].rms+rmsArr[ji-2].rms+rmsArr[ji-1].rms)/3;
         var aft=(rmsArr[ji].rms+rmsArr[ji+1].rms+rmsArr[ji+2].rms)/3;
         var jmp=aft-bef;
-        if(jmp>bestJumpScore && jmp>0.003){
-          // Verify sustained for ≥40ms
+        if(jmp>bestJumpScore && jmp>0.002){
           var sc=0;
           for(var sj=ji;sj<Math.min(ji+6,rmsArr.length);sj++){
-            if(rmsArr[sj].rms>bef+jmp*0.3)sc++;
+            if(rmsArr[sj].rms>bef+jmp*0.25)sc++;
           }
-          if(sc>=4){bestJumpScore=jmp;bestJumpIdx=ji}
+          if(sc>=3){bestJumpScore=jmp;bestJumpIdx=ji}
         }
       }
       if(bestJumpIdx>=0){
@@ -2282,7 +2248,7 @@ function detectWallTurns(rawDisplacements,sampleFps){
   // Use a generous minimum: at least 7 seconds between turns for short course,
   // 15 seconds for long course. This prevents false detections from splash/noise.
   const lapLen=getLapLen();
-  const minTimeBetweenTurns=lapLen>=50?15:7; // seconds
+  const minTimeBetweenTurns=lapLen>=50?18:10; // seconds (25yd lap ~10s min for elite)
   const minGap=Math.floor(sampleFps*minTimeBetweenTurns);
   let lastTurnI=-minGap*2;
 
@@ -2293,7 +2259,7 @@ function detectWallTurns(rawDisplacements,sampleFps){
   // Don't detect any turns before the swimmer could realistically reach a wall
   // Fastest possible: ~2.3 m/s sustained → 25yd (22.86m) in ~10s including start
   // Use conservative minimums from video start (not block depart, since we may not have that yet)
-  const minTimeToFirstWall=lapLen>=50?18:8; // seconds from video start
+  const minTimeToFirstWall=lapLen>=50?20:10; // seconds from video start (fastest 25yd ~10s)
   const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
 
   for(let i=1;i<sVel.length;i++){
