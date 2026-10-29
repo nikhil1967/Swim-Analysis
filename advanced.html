@@ -100,7 +100,8 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
 /* Timing events */
 .timing-box{background:rgba(255,215,64,.03);border:1px solid rgba(255,215,64,.08);border-radius:10px;padding:12px;margin-bottom:8px;display:none}
 .timing-box h3{font-size:11px;color:#ffd740;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
-.timing-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.timing-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px}
+@media(max-width:600px){.timing-grid{grid-template-columns:1fr 1fr}}
 .timing-item{background:rgba(255,255,255,.03);border-radius:8px;padding:8px 10px}
 .timing-item .tl{font-size:9px;color:#5a7a6a;letter-spacing:1px;text-transform:uppercase}
 .timing-item .tv{font-size:15px;font-weight:800;color:#ffd740;margin-top:2px;font-variant-numeric:tabular-nums}
@@ -283,19 +284,20 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
 
     <!-- TIMING EVENTS -->
     <div class="timing-box" id="timing-box">
-      <h3>Timing Events</h3>
-      <div class="timing-grid">
-        <div class="timing-item"><div class="tl">Beep (Start Tone)</div><div class="tv" id="tv-beep">--</div></div>
-        <div class="timing-item"><div class="tl">Block Departure</div><div class="tv" id="tv-block">--</div></div>
-        <div class="timing-item"><div class="tl">Reaction Time</div><div class="tv" id="tv-react">--</div></div>
+      <h3>⏱ Race Timeline</h3>
+      <div class="timing-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
+        <div class="timing-item"><div class="tl">🔔 Beep/Horn</div><div class="tv" id="tv-beep">--</div></div>
+        <div class="timing-item"><div class="tl">🏁 Block Depart</div><div class="tv" id="tv-block">--</div></div>
+        <div class="timing-item"><div class="tl">⚡ Reaction</div><div class="tv" id="tv-react">--</div></div>
+        <div class="timing-item"><div class="tl">↑ 1st Breakout</div><div class="tv" id="tv-breakout">--</div></div>
       </div>
       <div class="wall-times" id="wall-times-box" style="display:none">
         <div class="wt-label">Wall Touches (tap to seek)</div>
         <div class="wt-row" id="wall-times-row"></div>
       </div>
-      <div id="lap-splits-box" style="display:none;margin-top:6px">
-        <div class="wt-label" style="font-size:9px;color:#3a5a6a;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Lap Splits</div>
-        <div class="wt-row" id="lap-splits-row" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      <div id="lap-splits-box" style="display:none;margin-top:8px">
+        <div class="wt-label" style="font-size:9px;color:#76ff03;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Lap Splits</div>
+        <div class="wt-row" id="lap-splits-row" style="overflow-x:auto"></div>
       </div>
     </div>
 
@@ -2425,6 +2427,19 @@ function showTimingEvents(){
     document.getElementById('tv-react').textContent='--';
   }
 
+  // Start breakout
+  if(breakouts&&breakouts.startBreakout>0){
+    const brkEl=document.getElementById('tv-breakout');
+    if(blockDepartTime>0){
+      const uwDur=(breakouts.startBreakout-blockDepartTime).toFixed(2);
+      brkEl.innerHTML=uwDur+'<small>s UW</small>';
+    } else {
+      brkEl.textContent=fmT(breakouts.startBreakout);
+    }
+  } else {
+    document.getElementById('tv-breakout').textContent='--';
+  }
+
   // Wall touches
   if(wallTouches.length>0){
     document.getElementById('wall-times-box').style.display='block';
@@ -2454,7 +2469,6 @@ function showTimingEvents(){
       srow.innerHTML='';
 
       // Build breakout times aligned with laps
-      // Lap 1 breakout = startBreakout, Lap 2+ breakout = turnBreakout[lap-2]
       const lapBreakouts=[];
       if(breakouts){
         lapBreakouts.push(breakouts.startBreakout); // lap 1
@@ -2463,27 +2477,67 @@ function showTimingEvents(){
         }
       }
 
+      // Cumulative time from beep (for cumulative split column)
+      const raceStartTime=beepTime>=0?beepTime:startTime;
+
+      // Build a proper split table
+      let tbl='<table style="width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums">';
+      tbl+='<tr style="color:#5a7a8a;font-size:9px;letter-spacing:1px;text-transform:uppercase">';
+      tbl+='<th style="text-align:left;padding:4px 6px">Lap</th>';
+      tbl+='<th style="text-align:right;padding:4px 6px">Split</th>';
+      tbl+='<th style="text-align:right;padding:4px 6px">Cumul</th>';
+      tbl+='<th style="text-align:right;padding:4px 6px">Speed</th>';
+      tbl+='<th style="text-align:right;padding:4px 6px">UW</th>';
+      tbl+='<th style="text-align:right;padding:4px 6px">Surface</th>';
+      tbl+='</tr>';
+
+      let fastestLap=Infinity,slowestLap=0;
+      const lapData=[];
       for(let i=1;i<splitTimes.length;i++){
         const lapTime=splitTimes[i]-splitTimes[i-1];
         if(lapTime<=0)continue;
-        const lapSpeed=(getLapLen()/lapTime).toFixed(2);
-        const el=document.createElement('div');
-        el.className='wt-item';
-        el.style.background='rgba(118,255,3,.05)';el.style.color='#76ff03';
-        let html='Lap '+i+': '+lapTime.toFixed(2)+'s <small>'+(isFinite(lapSpeed)?lapSpeed:'--')+' '+speedUnit+'</small>';
-
-        // Underwater / surface split if breakout detected for this lap
-        const brkT=i<=lapBreakouts.length?lapBreakouts[i-1]:-1;
-        if(brkT>0&&brkT>splitTimes[i-1]&&brkT<splitTimes[i]){
-          const uwTime=(brkT-splitTimes[i-1]).toFixed(2);
-          const surfTime=(splitTimes[i]-brkT).toFixed(2);
-          html+='<br><small style="color:#00e5ff">🏊 UW '+uwTime+'s</small>';
-          html+=' <small style="color:#69f0ae">↑ Surface '+surfTime+'s</small>';
-        }
-        el.innerHTML=html;
-        srow.appendChild(el);
+        if(lapTime<fastestLap) fastestLap=lapTime;
+        if(lapTime>slowestLap) slowestLap=lapTime;
+        lapData.push({idx:i,lapTime:lapTime,endTime:splitTimes[i]});
       }
-    }
+
+      lapData.forEach(function(ld){
+        const lapSpeed=(getLapLen()/ld.lapTime);
+        const cumTime=ld.endTime-raceStartTime;
+        const brkT=ld.idx<=lapBreakouts.length?lapBreakouts[ld.idx-1]:-1;
+        const hasBreakout=(brkT>0&&brkT>splitTimes[ld.idx-1]&&brkT<splitTimes[ld.idx]);
+        const uwTime=hasBreakout?(brkT-splitTimes[ld.idx-1]):0;
+        const surfTime=hasBreakout?(splitTimes[ld.idx]-brkT):ld.lapTime;
+
+        // Color code: fastest=green, slowest=red, middle=white
+        let rowColor='#c8e6c9';
+        if(lapData.length>1){
+          const range=slowestLap-fastestLap;
+          if(range>0.01){
+            const pct=(ld.lapTime-fastestLap)/range;
+            if(pct<0.33) rowColor='#76ff03';
+            else if(pct>0.66) rowColor='#ff5252';
+            else rowColor='#ffd740';
+          }
+        }
+
+        tbl+='<tr style="color:'+rowColor+';border-top:1px solid rgba(255,255,255,.04);cursor:pointer" '+
+          'onclick="V.currentTime='+splitTimes[ld.idx-1].toFixed(3)+';V.pause();updateHUD();drawGraph();drawMotionGraph()">';
+        tbl+='<td style="padding:5px 6px;font-weight:700">'+ld.idx+'</td>';
+        tbl+='<td style="text-align:right;padding:5px 6px;font-weight:700">'+ld.lapTime.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
+        tbl+='<td style="text-align:right;padding:5px 6px;color:#8a9aaa">'+cumTime.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
+        tbl+='<td style="text-align:right;padding:5px 6px">'+(isFinite(lapSpeed)?lapSpeed.toFixed(2):'--')+' <small style="color:#5a7a8a">'+speedUnit+'</small></td>';
+        if(hasBreakout){
+          tbl+='<td style="text-align:right;padding:5px 6px;color:#00e5ff">'+uwTime.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
+          tbl+='<td style="text-align:right;padding:5px 6px;color:#69f0ae">'+surfTime.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
+        } else {
+          tbl+='<td style="text-align:right;padding:5px 6px;color:#3a4a5a">--</td>';
+          tbl+='<td style="text-align:right;padding:5px 6px;color:#3a4a5a">--</td>';
+        }
+        tbl+='</tr>';
+      });
+      tbl+='</table>';
+      srow.innerHTML=tbl;
   }
 }
 
