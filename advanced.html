@@ -485,13 +485,75 @@ function getVideoRenderRect(){
 // Falls back to static rope lines + camera shift compensation when detection fails
 let liveRopeLeft=null, liveRopeRight=null; // current-frame rope X at each scanned Y
 let cameraShiftX=0, cameraShiftY=0; // accumulated shift in normalized coords (0-1)
+// Sampled rope color signatures from initial tap points
+let ropeColorLeft=null, ropeColorRight=null; // {colors:[{r,g,b},...], waterColor:{r,g,b}}
 
-// Detect lane rope edges in the current frame by looking for bright features (rope)
-// against dark water. Lane ropes are white/blue/red — much brighter than water.
+// Sample rope colors from the tap points — called once after 4 rope taps
+function sampleRopeColors(){
+  if(!ropeLeft||!ropeRight)return;
+  const c=document.createElement('canvas');
+  c.width=V.videoWidth||V.clientWidth;
+  c.height=V.videoHeight||V.clientHeight;
+  const ctx=c.getContext('2d');
+  ctx.drawImage(V,0,0,c.width,c.height);
+
+  function sampleAt(xNorm,yNorm,label){
+    const px=Math.floor(xNorm*c.width);
+    const py=Math.floor(yNorm*c.height);
+    const r=3; // sample a 7x7 patch
+    const colors=[];
+    for(let dy=-r;dy<=r;dy++){
+      for(let dx=-r;dx<=r;dx++){
+        const sx=Math.max(0,Math.min(c.width-1,px+dx));
+        const sy=Math.max(0,Math.min(c.height-1,py+dy));
+        const d=ctx.getImageData(sx,sy,1,1).data;
+        colors.push({r:d[0],g:d[1],b:d[2]});
+      }
+    }
+    // Also sample water color: 20px inside the lane from this rope point
+    const lBounds=getLaneBoundsAtY(yNorm);
+    let waterX=xNorm;
+    if(lBounds){
+      const laneCenter=(lBounds.xLeft+lBounds.xRight)/2;
+      waterX=xNorm+(laneCenter-xNorm)*0.4; // 40% toward center
+    }
+    const wpx=Math.floor(waterX*c.width);
+    const wd=ctx.getImageData(Math.max(0,Math.min(c.width-1,wpx)),py,1,1).data;
+    const waterColor={r:wd[0],g:wd[1],b:wd[2]};
+
+    // Compute median color
+    const medR=colors.map(function(c){return c.r}).sort(function(a,b){return a-b})[Math.floor(colors.length/2)];
+    const medG=colors.map(function(c){return c.g}).sort(function(a,b){return a-b})[Math.floor(colors.length/2)];
+    const medB=colors.map(function(c){return c.b}).sort(function(a,b){return a-b})[Math.floor(colors.length/2)];
+
+    console.log('Rope '+label+' color: rgb('+medR+','+medG+','+medB+') water: rgb('+waterColor.r+','+waterColor.g+','+waterColor.b+')');
+    return {median:{r:medR,g:medG,b:medB}, colors:colors, waterColor:waterColor};
+  }
+
+  // Sample at both points of each rope, average the results
+  const l1=sampleAt(ropeLeft.x1,ropeLeft.y1,'left-1');
+  const l2=sampleAt(ropeLeft.x2,ropeLeft.y2,'left-2');
+  const r1=sampleAt(ropeRight.x1,ropeRight.y1,'right-1');
+  const r2=sampleAt(ropeRight.x2,ropeRight.y2,'right-2');
+
+  // Combine samples from both points of each rope
+  ropeColorLeft={
+    median:{r:Math.round((l1.median.r+l2.median.r)/2), g:Math.round((l1.median.g+l2.median.g)/2), b:Math.round((l1.median.b+l2.median.b)/2)},
+    waterColor:{r:Math.round((l1.waterColor.r+l2.waterColor.r)/2), g:Math.round((l1.waterColor.g+l2.waterColor.g)/2), b:Math.round((l1.waterColor.b+l2.waterColor.b)/2)}
+  };
+  ropeColorRight={
+    median:{r:Math.round((r1.median.r+r2.median.r)/2), g:Math.round((r1.median.g+r2.median.g)/2), b:Math.round((r1.median.b+r2.median.b)/2)},
+    waterColor:{r:Math.round((r1.waterColor.r+r2.waterColor.r)/2), g:Math.round((r1.waterColor.g+r2.waterColor.g)/2), b:Math.round((r1.waterColor.b+r2.waterColor.b)/2)}
+  };
+}
+
+// Detect lane rope edges in the current frame by searching for the sampled rope colors
+// Ropes can be any color (blue/yellow, red/white, etc.) — uses sampled colors, not hardcoded.
 // frameData: ImageData.data, sw/sh: frame size
 // Returns {left:{x1,y1,x2,y2}, right:{x1,y1,x2,y2}} or null
 function detectRopesInFrame(frameData,sw,sh){
   if(!ropeLeft||!ropeRight) return null;
+  if(!ropeColorLeft||!ropeColorRight) return null; // need sampled colors
 
   // Scan 4 horizontal lines spread through the lane area
   const scanYs=[0.35,0.50,0.65,0.80]; // normalized Y positions
@@ -517,36 +579,52 @@ function detectRopesInFrame(frameData,sw,sh){
     // Rope width in pixels (ropes are narrow: ~4-12px depending on zoom)
     const maxRopeW=Math.floor(sw*0.04);
 
-    // Helper: find the center of a narrow bright feature near expected X
-    function findRopeEdge(expX){
-      // Build a brightness profile along the scan line
+    // Color distance: how different is pixel (r,g,b) from a reference color?
+    function colorDist(idx,ref){
+      return Math.abs(frameData[idx]-ref.r)+Math.abs(frameData[idx+1]-ref.g)+Math.abs(frameData[idx+2]-ref.b);
+    }
+
+    // Helper: find the center of a rope-colored feature near expected X
+    // ropeCol: sampled rope color {median:{r,g,b}, waterColor:{r,g,b}}
+    function findRopeEdge(expX,ropeCol){
       const lo=Math.max(0,expX-searchR);
       const hi=Math.min(sw-1,expX+searchR);
-      // Find bright clusters — groups of consecutive bright pixels
+      const ropeRef=ropeCol.median;
+      const waterRef=ropeCol.waterColor;
+      // Threshold: pixel is "rope-like" if closer to rope color than to water color
+      // with a bias toward the rope color (must be at least 30% closer)
+
+      // Find clusters of rope-colored pixels
       let bestCenter=-1, bestScore=0;
       let clusterStart=-1;
       for(let x=lo;x<=hi+1;x++){
         const idx=(y*sw+x)*4;
-        const bright=x<=hi?(frameData[idx]*0.299+frameData[idx+1]*0.587+frameData[idx+2]*0.114):0;
-        if(bright>100&&x<=hi){
+        let isRope=false;
+        if(x<=hi){
+          const dRope=colorDist(idx,ropeRef);
+          const dWater=colorDist(idx,waterRef);
+          // Pixel matches rope if it's significantly closer to rope than water
+          // OR if it's very close to the rope color (within 80 RGB units total)
+          isRope=(dRope<dWater*0.7)||(dRope<80);
+        }
+        if(isRope){
           if(clusterStart<0) clusterStart=x;
         } else {
           if(clusterStart>=0){
             const clusterW=x-clusterStart;
-            if(clusterW<=maxRopeW&&clusterW>=1){
-              // This looks like a rope-width bright feature
+            if(clusterW<=maxRopeW&&clusterW>=2){
               const center=clusterStart+clusterW/2;
-              // Compute average brightness of cluster
-              let avgB=0;
+              // Compute average color match quality
+              let avgMatch=0;
               for(let cx=clusterStart;cx<x;cx++){
                 const ci=(y*sw+cx)*4;
-                avgB+=frameData[ci]*0.299+frameData[ci+1]*0.587+frameData[ci+2]*0.114;
+                avgMatch+=1/(1+colorDist(ci,ropeRef)/100);
               }
-              avgB/=clusterW;
-              // Score: brightness + proximity to expected + penalty for wide clusters
+              avgMatch/=clusterW;
+              // Score: color match + proximity + width penalty
               const proxScore=1-Math.abs(center-expX)/(searchR*1.5);
-              const widthPenalty=1-clusterW/maxRopeW*0.3; // slight penalty for wide
-              const score=avgB*0.5+proxScore*100*widthPenalty;
+              const widthBonus=Math.min(clusterW/3,1); // reward clusters >3px wide
+              const score=avgMatch*100+proxScore*60+widthBonus*20;
               if(score>bestScore){bestScore=score;bestCenter=center}
             }
             clusterStart=-1;
@@ -556,8 +634,8 @@ function detectRopesInFrame(frameData,sw,sh){
       return bestCenter;
     }
 
-    const lx=findRopeEdge(Math.floor(expected.xLeft*sw));
-    const rx=findRopeEdge(Math.floor(expected.xRight*sw));
+    const lx=findRopeEdge(Math.floor(expected.xLeft*sw),ropeColorLeft);
+    const rx=findRopeEdge(Math.floor(expected.xRight*sw),ropeColorRight);
 
     if(lx>=0) leftPts.push({x:lx/sw, y:yNorm});
     if(rx>=0) rightPts.push({x:rx/sw, y:yNorm});
@@ -629,7 +707,7 @@ function handlePoolMark(e){
 function startLaneSelect(){
   selectingLane=true;
   laneTapCount=0;
-  ropeTaps=[];ropeLeft=null;ropeRight=null;laneX=-1;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;ropeColorLeft=null;ropeColorRight=null;laneX=-1;
   V.pause();
   if(camMode==='endon'){
     document.getElementById('lane-btn').textContent='👆 Tap LEFT rope (point 1 of 2)...';
@@ -780,6 +858,8 @@ function handleLaneSelect(e){
     const midBounds=getLaneBoundsAtY(midY);
     if(midBounds){laneX=(midBounds.xLeft+midBounds.xRight)/2;laneW=(midBounds.xRight-midBounds.xLeft)/2}
     laneY=-1;
+    // Sample rope colors for dynamic tracking
+    sampleRopeColors();
     // Compute perspective vanishing point from rope lines
     computeVanishPoint();
     // Now prompt for swimmer cap tap
@@ -793,7 +873,7 @@ function handleLaneSelect(e){
     // Side view: single tap horizontal band (Y position)
     const yPct=coords.y;
     laneY=Math.max(0.1,Math.min(0.9,yPct));
-    laneX=-1;ropeLeft=null;ropeRight=null;
+    laneX=-1;ropeLeft=null;ropeRight=null;ropeColorLeft=null;ropeColorRight=null;
     document.getElementById('lane-val').textContent='Lane @ '+Math.round(laneY*100)+'%';
   }
   selectingLane=false;
@@ -805,7 +885,7 @@ function handleLaneSelect(e){
 }
 function clearLane(){
   laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;selectingSwimmer=false;
-  ropeTaps=[];ropeLeft=null;ropeRight=null;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;ropeColorLeft=null;ropeColorRight=null;
   swimmerColor=null;vanishPt=null;
   document.getElementById('lane-val').textContent='All (no filter)';
   document.getElementById('lane-clear-btn').style.display='none';
@@ -2252,7 +2332,7 @@ function resetVideo(){
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
   poolStartX=-1;poolFarX=-1;markingWall=null;
   laneY=-1;laneX=-1;laneTapCount=0;selectingLane=false;
-  ropeTaps=[];ropeLeft=null;ropeRight=null;waterYmin=0;waterYmax=1;
+  ropeTaps=[];ropeLeft=null;ropeRight=null;ropeColorLeft=null;ropeColorRight=null;waterYmin=0;waterYmax=1;
 
   // Reset UI
   document.getElementById('player-area').style.display='none';
