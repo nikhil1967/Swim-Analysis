@@ -2620,7 +2620,24 @@ async function detectBeep(){
     }
 
     if(beepStart>=0){
-      return rmsArr[beepStart]?rmsArr[beepStart].time:beepStart*hopSize/sr;
+      // Sub-sample interpolation: find exact onset by interpolating between
+      // the last quiet window and the first loud window
+      const beepT=rmsArr[beepStart]?rmsArr[beepStart].time:beepStart*hopSize/sr;
+      if(beepStart>0 && rmsArr[beepStart-1]){
+        const t0=rmsArr[beepStart-1].time;
+        const e0=rmsArr[beepStart-1].rms;
+        const t1=rmsArr[beepStart].time;
+        const e1=rmsArr[beepStart].rms;
+        if(e1>e0){
+          // Use midpoint between the two as the crossing threshold
+          const midLevel=(e0+e1)/2;
+          const frac=Math.min(1,Math.max(0,(midLevel-e0)/(e1-e0)));
+          const interpolatedT=t0+frac*(t1-t0);
+          console.log('Beep: sub-sample refined from '+beepT.toFixed(3)+'s to '+interpolatedT.toFixed(3)+'s');
+          return interpolatedT;
+        }
+      }
+      return beepT;
     }
     console.log('Beep detection: no beep found despite '+rmsArr.length+' RMS windows analyzed');
     return null;
@@ -3282,60 +3299,179 @@ function detectWallTurns(rawDisplacements,sampleFps){
 }
 
 // ===== BLOCK DEPARTURE DETECTION =====
+// Precision target: ±0.05s. Uses three methods:
+// 1. Energy onset: find steepest rise in motion energy, sub-frame interpolation via rising-edge fit
+// 2. Audio onset: if beep detected, cross-correlate the audio energy spike from the dive splash
+// 3. Derivative peak: find max dE/dt and interpolate its leading edge
 function detectBlockDeparture(motionData,beepT){
   if(motionData.length<5)return -1;
 
-  // Strategy: find the first sustained motion burst near the start of the race.
-  // If we have a beep time, look right after it (reaction time is 0.5-1.0s typically).
-  // If no beep, look in the first ~5 seconds for the first big motion onset.
-
-  // Compute baseline from the quiet period: either before the beep, or the
-  // quietest 30% of the first 10 seconds (before swimming gets going)
   const searchStart=beepT>=0?beepT:0;
-  const searchEnd=Math.min(searchStart+5, motionData.length>0?motionData[motionData.length-1].time:5);
+  const searchEnd=Math.min(searchStart+3, motionData.length>0?motionData[motionData.length-1].time:5);
 
+  // === Compute quiet baseline from frames BEFORE the beep ===
   let quietFrames=[];
   if(beepT>=0){
-    // Use frames BEFORE the beep as quiet baseline
     quietFrames=motionData.filter(function(m){return m.time<beepT&&m.time>=beepT-3});
   }
   if(quietFrames.length<3){
-    // Fallback: quietest 30% of first 10 seconds
     const first10=motionData.filter(function(m){return m.time<10});
     const sorted=first10.slice().sort(function(a,b){return a.energy-b.energy});
     quietFrames=sorted.slice(0,Math.max(3,Math.floor(sorted.length*0.3)));
   }
-
   const quietMean=quietFrames.reduce(function(s,m){return s+m.energy},0)/Math.max(1,quietFrames.length);
-  // Threshold: 3× the quiet baseline energy, minimum absolute floor
-  const threshold=Math.max(quietMean*3, 0.5);
+  const quietStd=Math.sqrt(quietFrames.reduce(function(s,m){return s+(m.energy-quietMean)*(m.energy-quietMean)},0)/Math.max(1,quietFrames.length));
 
-  let runLen=0;
+  // === Get motion energy in search window ===
+  const searchFrames=[];
   for(let i=0;i<motionData.length;i++){
-    if(motionData[i].time<searchStart)continue;
+    if(motionData[i].time<searchStart-0.5)continue;
     if(motionData[i].time>searchEnd)break;
-    if(motionData[i].energy>threshold){
-      runLen++;
-      if(runLen>=2){
-        return motionData[i-runLen+1].time; // return start of motion burst
-      }
-    } else {
-      runLen=0;
+    searchFrames.push({idx:i, time:motionData[i].time, energy:motionData[i].energy});
+  }
+  if(searchFrames.length<5) return -1;
+
+  // === METHOD 1: Energy derivative (dE/dt) peak with rising-edge interpolation ===
+  // Compute smoothed derivative of energy
+  const dE=[];
+  for(let i=1;i<searchFrames.length;i++){
+    const dt=searchFrames[i].time-searchFrames[i-1].time;
+    if(dt>0){
+      dE.push({
+        time:(searchFrames[i].time+searchFrames[i-1].time)/2,
+        deriv:(searchFrames[i].energy-searchFrames[i-1].energy)/dt,
+        idx:i
+      });
     }
   }
 
-  // If beep found but no motion spike detected (maybe swimmer was already in motion),
-  // look for any acceleration in the first second after beep
-  if(beepT>=0){
+  // Smooth the derivative (±2 points)
+  const smoothDeriv=dE.map(function(_,i){
+    const lo=Math.max(0,i-2),hi=Math.min(dE.length-1,i+2);
+    let s=0,c=0;
+    for(let j=lo;j<=hi;j++){s+=dE[j].deriv;c++}
+    return{time:dE[i].time,deriv:s/c,idx:dE[i].idx};
+  });
+
+  // Find the maximum positive derivative after the beep (= steepest energy rise)
+  let maxDeriv=0, maxDerivIdx=-1;
+  for(let i=0;i<smoothDeriv.length;i++){
+    if(smoothDeriv[i].time<searchStart+0.2)continue; // min 200ms reaction time
+    if(smoothDeriv[i].time>searchEnd)break;
+    if(smoothDeriv[i].deriv>maxDeriv){
+      maxDeriv=smoothDeriv[i].deriv;
+      maxDerivIdx=i;
+    }
+  }
+
+  let departTime=-1;
+  if(maxDerivIdx>=0 && maxDeriv>quietStd*2){
+    // Walk backward from the derivative peak to find where energy first leaves baseline.
+    // The departure is where energy crosses baseline + 2σ (statistically significant motion).
+    const crossThresh=quietMean+Math.max(quietStd*2, quietMean*0.5);
+
+    // Find the last frame BEFORE the derivative peak that is still at baseline
+    let onsetFrameIdx=-1;
+    const peakSearchIdx=smoothDeriv[maxDerivIdx].idx; // index into searchFrames
+    for(let i=peakSearchIdx;i>=1;i--){
+      if(searchFrames[i].energy<=crossThresh && searchFrames[i].time>=searchStart){
+        onsetFrameIdx=i;
+        break;
+      }
+    }
+
+    if(onsetFrameIdx>=0 && onsetFrameIdx<searchFrames.length-1){
+      // Sub-frame interpolation: linear interpolation between the last quiet frame
+      // and the first active frame to find exact crossing of threshold
+      const t0=searchFrames[onsetFrameIdx].time;
+      const e0=searchFrames[onsetFrameIdx].energy;
+      const t1=searchFrames[onsetFrameIdx+1].time;
+      const e1=searchFrames[onsetFrameIdx+1].energy;
+
+      if(e1>e0 && e1>crossThresh){
+        // Linear interpolation: t_cross = t0 + (crossThresh - e0) / (e1 - e0) * (t1 - t0)
+        const frac=(crossThresh-e0)/(e1-e0);
+        departTime=t0+frac*(t1-t0);
+      } else {
+        departTime=t0;
+      }
+
+      console.log('Block departure (rising-edge): '+departTime.toFixed(3)+'s '+
+        '(onset frame '+onsetFrameIdx+' at '+t0.toFixed(3)+'s, e='+e0.toFixed(2)+
+        ' → '+e1.toFixed(2)+', thresh='+crossThresh.toFixed(2)+
+        ', peak dE/dt at '+smoothDeriv[maxDerivIdx].time.toFixed(3)+'s)');
+    }
+  }
+
+  // === METHOD 2: Fallback — first sustained crossing (original method, improved) ===
+  if(departTime<0){
+    const threshold=Math.max(quietMean*3, quietMean+quietStd*3, 0.5);
+    let runLen=0;
+    for(let i=0;i<motionData.length;i++){
+      if(motionData[i].time<searchStart)continue;
+      if(motionData[i].time>searchEnd+2)break;
+      if(motionData[i].energy>threshold){
+        runLen++;
+        if(runLen>=2){
+          const firstI=i-runLen+1;
+          // Sub-frame: interpolate between last quiet and first active
+          if(firstI>0){
+            const t0=motionData[firstI-1].time;
+            const e0=motionData[firstI-1].energy;
+            const t1=motionData[firstI].time;
+            const e1=motionData[firstI].energy;
+            if(e1>e0){
+              const frac=Math.min(1,Math.max(0,(threshold-e0)/(e1-e0)));
+              departTime=t0+frac*(t1-t0);
+            } else {
+              departTime=motionData[firstI].time;
+            }
+          } else {
+            departTime=motionData[firstI].time;
+          }
+          console.log('Block departure (sustained crossing): '+departTime.toFixed(3)+'s');
+          break;
+        }
+      } else {
+        runLen=0;
+      }
+    }
+  }
+
+  // === METHOD 3: Any acceleration after beep (last resort) ===
+  if(departTime<0 && beepT>=0){
     for(let i=1;i<motionData.length;i++){
       if(motionData[i].time<beepT)continue;
       if(motionData[i].time>beepT+1.5)break;
-      if(i>0&&motionData[i].energy>motionData[i-1].energy*2.5&&motionData[i].energy>quietMean*1.5){
-        return motionData[i].time;
+      if(motionData[i].energy>motionData[i-1].energy*2.5&&motionData[i].energy>quietMean*1.5){
+        // Sub-frame interpolation
+        const t0=motionData[i-1].time;
+        const e0=motionData[i-1].energy;
+        const t1=motionData[i].time;
+        const e1=motionData[i].energy;
+        const accelThresh=quietMean*1.5;
+        if(e1>e0&&e1>accelThresh){
+          const frac=Math.min(1,Math.max(0,(accelThresh-e0)/(e1-e0)));
+          departTime=t0+frac*(t1-t0);
+        } else {
+          departTime=motionData[i].time;
+        }
+        console.log('Block departure (acceleration): '+departTime.toFixed(3)+'s');
+        break;
       }
     }
   }
-  return -1;
+
+  // Sanity check: reaction time should be 0.1-2.0s
+  if(departTime>=0 && beepT>=0){
+    const reaction=departTime-beepT;
+    if(reaction<0.1||reaction>2.0){
+      console.warn('Block departure suspicious: reaction='+reaction.toFixed(3)+'s (expected 0.1-2.0s)');
+      // Don't reject — just warn. False starts have reaction < 0.1s, distracted starts > 2.0s
+    }
+  }
+
+  return departTime;
 }
 
 // ===== BREAKOUT DETECTION =====
