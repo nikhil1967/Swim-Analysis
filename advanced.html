@@ -3098,12 +3098,18 @@ function detectWallTurns(rawDisplacements,sampleFps){
   mergedTurns.sort(function(a,b){return a.time-b.time});
 
   // For position-based turns, cross-check with nearby energy dips (±1.5s)
-  // With sub-frame interpolation, position time is already precise — use energy only as validation
+  // With sub-frame interpolation, position time is already precise — use energy only as validation.
+  // Also detect GLIDE: if energy dip precedes position extremum, the swimmer coasted into the wall.
+  // Glide time = position_time - energy_dip_time (positive = gliding in).
   for(var ri=0;ri<mergedTurns.length;ri++){
     if(mergedTurns[ri].source==='position'){
       for(var di=0;di<dipRegions.length;di++){
-        const diff=Math.abs(dipRegions[di].time-mergedTurns[ri].time);
-        if(diff<1.5){
+        const diff=dipRegions[di].time-mergedTurns[ri].time; // negative = energy dip before position
+        if(Math.abs(diff)<1.5){
+          // Record glide time: how much earlier the energy dropped vs wall touch
+          // Positive glideTime = swimmer was gliding (energy dropped before contact)
+          mergedTurns[ri].glideTime=Math.max(0,-diff); // in seconds
+          mergedTurns[ri].energyDipTime=dipRegions[di].time;
           // Average the two estimates weighted toward position (which has sub-frame precision)
           mergedTurns[ri].time=mergedTurns[ri].time*0.7+dipRegions[di].time*0.3;
           break;
@@ -3112,6 +3118,9 @@ function detectWallTurns(rawDisplacements,sampleFps){
     } else if(mergedTurns[ri].source==='velocity'){
       for(var di=0;di<dipRegions.length;di++){
         if(Math.abs(dipRegions[di].time-mergedTurns[ri].time)<2.0){
+          const diff2=dipRegions[di].time-mergedTurns[ri].time;
+          mergedTurns[ri].glideTime=Math.max(0,-diff2);
+          mergedTurns[ri].energyDipTime=dipRegions[di].time;
           mergedTurns[ri].time=dipRegions[di].time;
           break;
         }
@@ -3850,6 +3859,7 @@ function showTimingEvents(){
       tbl+='<th style="text-align:right;padding:4px 6px">Speed</th>';
       tbl+='<th style="text-align:right;padding:4px 6px">UW</th>';
       tbl+='<th style="text-align:right;padding:4px 6px">Surface</th>';
+      tbl+='<th style="text-align:right;padding:4px 6px">Glide</th>';
       tbl+='</tr>';
 
       let fastestLap=Infinity,slowestLap=0;
@@ -3893,6 +3903,18 @@ function showTimingEvents(){
           tbl+='<td style="text-align:right;padding:5px 6px;color:#69f0ae">'+surfTime.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
         } else {
           tbl+='<td style="text-align:right;padding:5px 6px;color:#3a4a5a">--</td>';
+          tbl+='<td style="text-align:right;padding:5px 6px;color:#3a4a5a">--</td>';
+        }
+        // Glide time: how long the swimmer coasted into the wall
+        const wallObj=validWalls[ld.idx-1];
+        const glide=wallObj&&wallObj.glideTime>0?wallObj.glideTime:0;
+        if(glide>0.15){
+          // Significant glide (>150ms) — warn in orange/red
+          const glideColor=glide>0.4?'#ff5252':'#ffa726';
+          tbl+='<td style="text-align:right;padding:5px 6px;color:'+glideColor+'" title="Swimmer glided into wall — coach may want to address">'+glide.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
+        } else if(glide>0.05){
+          tbl+='<td style="text-align:right;padding:5px 6px;color:#8a9aaa">'+glide.toFixed(2)+'<small style="color:#5a7a8a">s</small></td>';
+        } else {
           tbl+='<td style="text-align:right;padding:5px 6px;color:#3a4a5a">--</td>';
         }
         tbl+='</tr>';
