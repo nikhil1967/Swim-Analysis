@@ -1233,7 +1233,7 @@ async function scanVideo(){
   btn.className='scan-btn scanning';btn.textContent='Scanning...';btn.disabled=true;
   V.pause();
 
-  const sampleFps=15;
+  const sampleFps=30;
   const totalSamples=Math.floor(V.duration*sampleFps);
   const sw=320,sh=180;
   sC.width=sw;sC.height=sh;
@@ -1262,6 +1262,7 @@ async function scanVideo(){
   const rawDisplacements=[],rawMotion=[];
   laneMotionEnergy=[]; // per-frame total motion energy within lane bounds (for wall detection)
   cameraShiftX=0;cameraShiftY=0; // reset camera motion compensation
+  let cumulativeCamY=0; // cumulative camera Y shift in normalized coords (for continuous compensation)
   liveRopeLeft=null;liveRopeRight=null; // reset live rope detection
   const progress=document.getElementById('scan-progress');
 
@@ -1285,9 +1286,8 @@ async function scanVideo(){
 
           if(camMode==='endon'){
             // === DYNAMIC ROPE DETECTION ===
-            // Track lane ropes by their brightness (white/blue/red vs dark water)
-            // every 5th frame to keep it fast. Updates live rope lines.
-            if(usePerspective && i%5===0){
+            // Track lane ropes every 2nd frame for continuous camera compensation.
+            if(usePerspective && i%2===0){
               const ropes=detectRopesInFrame(frameData,sw,sh);
               if(ropes){
                 liveRopeLeft=ropes.left;
@@ -1434,6 +1434,7 @@ async function scanVideo(){
               // Accumulate shift in normalized coords
               cameraShiftY+=bestShift/sh;
               cameraShiftX+=bestShiftX/sw;
+              cumulativeCamY+=bestShift/sh; // also feed cumulative tracker
               // Also adjust waterYmin/waterYmax to track the shifting pool
               waterYmin+=bestShift/sh;
               waterYmax+=bestShift/sh;
@@ -1447,10 +1448,69 @@ async function scanVideo(){
 
             } else {
 
+            // === CONTINUOUS CAMERA Y-SHIFT ESTIMATION ===
+            // Even on non-zoom frames, the camera pans slowly to follow the swimmer.
+            // Use lightweight 1D column correlation to measure frame-to-frame Y shift.
+            let frameCamShiftY=0;
+            if(prevFrame){
+              // Sample a narrow column near the rope (more stable than lane center)
+              const colX=usePerspective && liveRopeLeft ? Math.max(0,Math.floor(liveRopeLeft.x1*sw)-5) : Math.floor(sw*0.3);
+              const colW=Math.max(2,Math.floor(sw*0.03));
+              const maxShiftPx=Math.floor(sh*0.04); // search ±4% of frame height
+              let bestDy=0,bestSAD=Infinity;
+              for(let dy=-maxShiftPx;dy<=maxShiftPx;dy++){
+                let sad=0,cnt=0;
+                for(let y=Math.max(0,-dy);y<Math.min(sh,sh-dy);y+=4){
+                  for(let x=colX;x<Math.min(colX+colW,sw);x+=2){
+                    const i1=(y*sw+x)*4;
+                    const i2=((y+dy)*sw+x)*4;
+                    if(i1>=0&&i2>=0&&i1<frameData.length-3&&i2<prevFrame.length-3){
+                      sad+=Math.abs(frameData[i1]-prevFrame[i2])
+                          +Math.abs(frameData[i1+1]-prevFrame[i2+1])
+                          +Math.abs(frameData[i1+2]-prevFrame[i2+2]);
+                      cnt++;
+                    }
+                  }
+                }
+                if(cnt>0){sad/=cnt;if(sad<bestSAD){bestSAD=sad;bestDy=dy}}
+              }
+              // Sub-pixel refinement: parabolic fit on SAD values around best
+              if(Math.abs(bestDy)<maxShiftPx){
+                const getSAD=function(dy){
+                  let sad=0,cnt=0;
+                  for(let y=Math.max(0,-dy);y<Math.min(sh,sh-dy);y+=4){
+                    for(let x=colX;x<Math.min(colX+colW,sw);x+=2){
+                      const i1=(y*sw+x)*4;
+                      const i2=((y+dy)*sw+x)*4;
+                      if(i1>=0&&i2>=0&&i1<frameData.length-3&&i2<prevFrame.length-3){
+                        sad+=Math.abs(frameData[i1]-prevFrame[i2])
+                            +Math.abs(frameData[i1+1]-prevFrame[i2+1])
+                            +Math.abs(frameData[i1+2]-prevFrame[i2+2]);
+                        cnt++;
+                      }
+                    }
+                  }
+                  return cnt>0?sad/cnt:Infinity;
+                };
+                const sM=bestSAD;
+                const sL=getSAD(bestDy-1);
+                const sR=getSAD(bestDy+1);
+                const denom=2*(sL+sR-2*sM);
+                if(Math.abs(denom)>1e-6){
+                  frameCamShiftY=bestDy+(sL-sR)/denom;
+                } else {
+                  frameCamShiftY=bestDy;
+                }
+              } else {
+                frameCamShiftY=bestDy;
+              }
+              // Only apply if SAD quality is good (not a scene change)
+              if(bestSAD>80) frameCamShiftY=0; // high SAD = unreliable
+              cumulativeCamY+=frameCamShiftY/sh;
+            }
+
             // Determine swim direction from previous positions to find leading edge
-            // Swimming TOWARD camera: leading edge = highest Y (bottom of active zone)
-            // Swimming AWAY from camera: leading edge = lowest Y (top of active zone)
-            let swimDir=0; // +1 = toward camera (Y increasing), -1 = away
+            let swimDir=0;
             if(rawDisplacements.length>=3){
               const recent=rawDisplacements.slice(-3);
               const trend=recent[recent.length-1].posX-recent[0].posX;
@@ -1460,25 +1520,23 @@ async function scanVideo(){
             // Find the leading edge of the active zone
             let edgeY=-1;
             if(swimDir>=0){
-              // Swimming toward camera or unknown: scan from bottom up, find first active row
               for(let j=numBins-1;j>=0;j--){
                 if(combined[j]>edgeThresh){edgeY=yStart+j*step;break}
               }
             } else {
-              // Swimming away: scan from top down, find first active row
               for(let j=0;j<numBins;j++){
                 if(combined[j]>edgeThresh){edgeY=yStart+j*step;break}
               }
             }
 
-            // Also find the peak of the combined profile as a secondary estimate
+            // Also find the peak of the combined profile
             let peakY=sh/2;
             let peakMax=0;
             for(let j=0;j<numBins;j++){
               if(combined[j]>peakMax){peakMax=combined[j];peakY=yStart+j*step}
             }
 
-            // Blend: use 70% leading edge + 30% peak position
+            // Blend: 70% leading edge + 30% peak
             let swimmerY;
             if(edgeY>=0){
               swimmerY=edgeY*0.7+peakY*0.3;
@@ -1486,24 +1544,27 @@ async function scanVideo(){
               swimmerY=peakY;
             }
 
-            // Normalize position to WATER BOUNDS, not frame height.
-            // swimmerY is in pixel coords within [waterYmin*sh, waterYmax*sh].
-            // Map to [0,1] within visible pool area so position is independent of
-            // how much non-pool area (deck, sky) is in frame.
+            // === APPLY CAMERA COMPENSATION ===
+            // Subtract cumulative camera Y shift to get pool-relative position.
+            // Camera shift is in normalized coords; convert to pixels.
+            swimmerY-=cumulativeCamY*sh;
+
+            // Normalize to WATER BOUNDS
             const waterTop=waterYmin*sh;
             const waterBot=waterYmax*sh;
             const waterRange=Math.max(waterBot-waterTop,1);
-            // Temporal smoothing: EMA with α=0.5
+            // Temporal smoothing: EMA with α=0.35 (tighter than before for 30fps)
+            const emaAlpha=0.35;
             const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*waterRange:-1;
             if(prevPosY>=0){
-              // Limit max jump per frame to 10% of water range
-              const maxJump=waterRange*0.10;
+              // Limit max jump per frame to 6% of water range (tighter at 30fps)
+              const maxJump=waterRange*0.06;
               const delta=swimmerY-waterTop-prevPosY;
               if(Math.abs(delta)>maxJump){
                 swimmerY=waterTop+prevPosY+Math.sign(delta)*maxJump;
               }
               const newRel=swimmerY-waterTop;
-              const smoothed=0.5*newRel+0.5*prevPosY;
+              const smoothed=emaAlpha*newRel+(1-emaAlpha)*prevPosY;
               rawDisplacements.push({time:t,posX:smoothed/waterRange});
             } else {
               rawDisplacements.push({time:t,posX:(swimmerY-waterTop)/waterRange});
@@ -1703,8 +1764,8 @@ async function scanVideo(){
     });
   }
 
-  // Smooth speed with wider window
-  const win=8; // ±8 frames at 15fps = ±1.07s window
+  // Smooth speed with wider window (~1s each side regardless of fps)
+  const win=Math.max(8,Math.round(sampleFps*1.0));
   flowData=[];let cumDist=0;
   for(let i=0;i<rawSpeeds.length;i++){
     let sum=0,cnt=0;
@@ -2663,19 +2724,30 @@ function detectWallTurns(rawDisplacements,sampleFps){
   const minTimeToFirstWall=lapLen>=50?20:10;
   const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
 
-  // === Smooth position data (used by Methods A and C) ===
+  // === Smooth position data with Savitzky-Golay filter (used by Methods A and C) ===
+  // SG filter preserves peak shape better than median filter — critical for sub-frame wall detection
   const posArr=rawDisplacements.map(function(d){return d.posX});
-  const smoothR=6;
+
+  // Savitzky-Golay 2nd-order polynomial, window=7 (half-width 3)
+  // Coefficients for quadratic SG with m=3: [-2,3,6,7,6,3,-2]/21
+  const sgCoeffs=[-2,3,6,7,6,3,-2];
+  const sgNorm=21;
+  const sgHalf=3;
   const smoothPos=posArr.map(function(_,i){
-    const lo=Math.max(0,i-smoothR),hi=Math.min(posArr.length-1,i+smoothR);
-    const w=[];for(let j=lo;j<=hi;j++)w.push(posArr[j]);
-    w.sort(function(a,b){return a-b});
-    if(w.length>4){w.shift();w.pop()}
-    return w.reduce(function(a,b){return a+b},0)/w.length;
+    if(i<sgHalf||i>=posArr.length-sgHalf){
+      // Fallback to simple average at edges
+      const lo=Math.max(0,i-sgHalf),hi=Math.min(posArr.length-1,i+sgHalf);
+      let s=0,c=0;for(let j=lo;j<=hi;j++){s+=posArr[j];c++}
+      return s/c;
+    }
+    let s=0;
+    for(let k=-sgHalf;k<=sgHalf;k++) s+=sgCoeffs[k+sgHalf]*posArr[i+k];
+    return s/sgNorm;
   });
 
   const vel=[];
   for(let i=1;i<smoothPos.length;i++) vel.push(smoothPos[i]-smoothPos[i-1]);
+  // SG derivative coefficients for m=3: [-3,-2,-1,0,1,2,3]/28 (first derivative)
   const sVel=vel.map(function(_,i){
     const lo=Math.max(0,i-3),hi=Math.min(vel.length-1,i+3);
     let s=0,c=0;for(let j=lo;j<=hi;j++){s+=vel[j];c++}
@@ -2724,7 +2796,47 @@ function detectWallTurns(rawDisplacements,sampleFps){
               const de=Math.abs(smoothPos[extremeI]-posMid);
               if(dj>de)extremeI=j;
             }
-            const wallTime=rawDisplacements[extremeI].time;
+            // Sub-frame parabolic interpolation at extremum
+            // Fit y = a*t^2 + b*t + c to ±2 frames around extremeI
+            // The peak is at t = -b/(2a) which gives sub-frame precision
+            let wallTime=rawDisplacements[extremeI].time;
+            const fitHalf=2;
+            if(extremeI>=fitHalf && extremeI<smoothPos.length-fitHalf){
+              // Use 5 points: extremeI-2 to extremeI+2
+              // For position extremum, we fit the position curve and find its peak
+              const pts=[];
+              for(let k=-fitHalf;k<=fitHalf;k++){
+                const tK=rawDisplacements[extremeI+k].time;
+                const pK=smoothPos[extremeI+k];
+                pts.push({t:tK,p:pK});
+              }
+              // Least-squares quadratic fit: p = a*dt^2 + b*dt + c (dt relative to center)
+              const tC=pts[fitHalf].t; // center time
+              let st2=0,st4=0,st=0,st3=0,sp=0,stp=0,st2p=0,n=pts.length;
+              for(let k=0;k<n;k++){
+                const dt=pts[k].t-tC;
+                const dt2=dt*dt;
+                st+=dt; st2+=dt2; st3+=dt*dt2; st4+=dt2*dt2;
+                sp+=pts[k].p; stp+=dt*pts[k].p; st2p+=dt2*pts[k].p;
+              }
+              // Solve 3x3 system for [a,b,c]:
+              // [st4 st3 st2] [a]   [st2p]
+              // [st3 st2 st ] [b] = [stp ]
+              // [st2 st  n  ] [c]   [sp  ]
+              const det=st4*(st2*n-st*st)-st3*(st3*n-st*st2)+st2*(st3*st-st2*st2);
+              if(Math.abs(det)>1e-15){
+                const a=(st2p*(st2*n-st*st)-stp*(st3*n-st*st2)+sp*(st3*st-st2*st2))/det;
+                const b=(st4*(stp*n-st*sp)-st3*(st2p*n-st2*sp)+st2*(st2p*st-stp*st2))/det;
+                if(Math.abs(a)>1e-12){
+                  const dtPeak=-b/(2*a);
+                  // Only accept if the peak is within ±1 frame of the discrete extremum
+                  const maxDt=1.5/sampleFps;
+                  if(Math.abs(dtPeak)<maxDt){
+                    wallTime=tC+dtPeak;
+                  }
+                }
+              }
+            }
             if(wallTime-lastPosWallTime>=minTimeBetweenTurns){
               positionTurns.push({time:wallTime,posX:smoothPos[extremeI],index:extremeI});
               lastPosWallTime=wallTime;
@@ -2742,7 +2854,31 @@ function detectWallTurns(rawDisplacements,sampleFps){
           const de=Math.abs(smoothPos[extremeI]-posMid);
           if(dj>de)extremeI=j;
         }
-        const wallTime=rawDisplacements[extremeI].time;
+        // Sub-frame interpolation for finish
+        let wallTime=rawDisplacements[extremeI].time;
+        const fitHalf=2;
+        if(extremeI>=fitHalf && extremeI<smoothPos.length-fitHalf){
+          const pts=[];
+          for(let k=-fitHalf;k<=fitHalf;k++){
+            pts.push({t:rawDisplacements[extremeI+k].time,p:smoothPos[extremeI+k]});
+          }
+          const tC=pts[fitHalf].t;
+          let st2=0,st4=0,st=0,st3=0,sp=0,stp=0,st2p=0,n=pts.length;
+          for(let k=0;k<n;k++){
+            const dt=pts[k].t-tC;const dt2=dt*dt;
+            st+=dt;st2+=dt2;st3+=dt*dt2;st4+=dt2*dt2;
+            sp+=pts[k].p;stp+=dt*pts[k].p;st2p+=dt2*pts[k].p;
+          }
+          const det=st4*(st2*n-st*st)-st3*(st3*n-st*st2)+st2*(st3*st-st2*st2);
+          if(Math.abs(det)>1e-15){
+            const a=(st2p*(st2*n-st*st)-stp*(st3*n-st*st2)+sp*(st3*st-st2*st2))/det;
+            const b=(st4*(stp*n-st*sp)-st3*(st2p*n-st2*sp)+st2*(st2p*st-stp*st2))/det;
+            if(Math.abs(a)>1e-12){
+              const dtPeak=-b/(2*a);
+              if(Math.abs(dtPeak)<1.5/sampleFps) wallTime=tC+dtPeak;
+            }
+          }
+        }
         if(wallTime-lastPosWallTime>=minTimeBetweenTurns){
           positionTurns.push({time:wallTime,posX:smoothPos[extremeI],index:extremeI,isFinish:true});
         }
@@ -2756,7 +2892,7 @@ function detectWallTurns(rawDisplacements,sampleFps){
   // Smooth lane motion energy with wide window, excluding zoom frames
   const eArr=laneMotionEnergy.map(function(d){return d.energy});
   const isZoom=laneMotionEnergy.map(function(d){return d.isZoom||false});
-  const eSmoothR=5; // ±5 frames (~0.67s at 15fps)
+  const eSmoothR=Math.max(5,Math.round(sampleFps*0.33)); // ~0.33s window
   const eSmooth=eArr.map(function(_,i){
     const lo=Math.max(0,i-eSmoothR),hi=Math.min(eArr.length-1,i+eSmoothR);
     let s=0,c=0;
@@ -2878,19 +3014,30 @@ function detectWallTurns(rawDisplacements,sampleFps){
   // Sort by time
   mergedTurns.sort(function(a,b){return a.time-b.time});
 
-  // For position-based turns, refine timing with nearby energy dips (±2s) if available
+  // For position-based turns, cross-check with nearby energy dips (±1.5s)
+  // With sub-frame interpolation, position time is already precise — use energy only as validation
   for(var ri=0;ri<mergedTurns.length;ri++){
-    if(mergedTurns[ri].source==='position'||mergedTurns[ri].source==='velocity'){
+    if(mergedTurns[ri].source==='position'){
+      for(var di=0;di<dipRegions.length;di++){
+        const diff=Math.abs(dipRegions[di].time-mergedTurns[ri].time);
+        if(diff<1.5){
+          // Average the two estimates weighted toward position (which has sub-frame precision)
+          mergedTurns[ri].time=mergedTurns[ri].time*0.7+dipRegions[di].time*0.3;
+          break;
+        }
+      }
+    } else if(mergedTurns[ri].source==='velocity'){
       for(var di=0;di<dipRegions.length;di++){
         if(Math.abs(dipRegions[di].time-mergedTurns[ri].time)<2.0){
-          mergedTurns[ri].time=dipRegions[di].time; // energy dip time is more precise
+          mergedTurns[ri].time=dipRegions[di].time;
           break;
         }
       }
     }
   }
 
-  console.log('Merged: '+mergedTurns.length+' walls (primary='+primaryLabel+', expected='+expectedWallTouches+')');
+  console.log('Merged: '+mergedTurns.length+' walls (primary='+primaryLabel+', expected='+expectedWallTouches+', sampleFps='+sampleFps+')');
+  mergedTurns.forEach(function(t,i){console.log('  Wall '+(i+1)+': t='+t.time.toFixed(3)+'s (source='+t.source+')')});
 
   // === FINISH DETECTION ===
   // If we have turns but fewer than expected, try to find the finish
