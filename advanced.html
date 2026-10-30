@@ -821,11 +821,13 @@ function detectRopesInFrame(frameData,sw,sh){
 function getLaneBoundsAtY(yNorm){
   if(!ropeLeft||!ropeRight) return null;
 
-  // Use live-detected ropes if available (updated each frame during scan)
-  const useLeft=liveRopeLeft||ropeLeft;
-  const useRight=liveRopeRight||ropeRight;
-  const shiftX=liveRopeLeft?0:cameraShiftX; // no shift needed for live detection
-  const shiftY=liveRopeLeft?0:cameraShiftY;
+  // ALWAYS use the user's tapped rope positions as the authoritative reference.
+  // Live rope detection was overriding these with wrong ropes — disabled.
+  // Apply only camera shift compensation for subtle drift.
+  const useLeft=ropeLeft;
+  const useRight=ropeRight;
+  const shiftX=cameraShiftX;
+  const shiftY=cameraShiftY;
 
   const adjY=yNorm-shiftY;
   const lDy=useLeft.y2-useLeft.y1;
@@ -1117,26 +1119,45 @@ function drawLaneOverlay(){
   }
 
   if(ropeLeft&&ropeRight){
-    // Highlight lane ropes as glowing lines (no trapezoid, no darkening)
-    const topB=getLaneBoundsAtY(waterYmin), botB=getLaneBoundsAtY(waterYmax);
-    if(topB&&botB){
-      const topPx=vr.y+waterYmin*vr.h, botPx=vr.y+waterYmax*vr.h;
-      const tl=vr.x+topB.xLeft*vr.w, tr=vr.x+topB.xRight*vr.w;
-      const bl=vr.x+botB.xLeft*vr.w, br=vr.x+botB.xRight*vr.w;
+    // Highlight lane ropes as glowing lines extending along the full rope length
+    // Use the actual rope endpoints (tapped by user), not just water bounds
+    const lx1=vr.x+ropeLeft.x1*vr.w, ly1=vr.y+ropeLeft.y1*vr.h;
+    const lx2=vr.x+ropeLeft.x2*vr.w, ly2=vr.y+ropeLeft.y2*vr.h;
+    const rx1=vr.x+ropeRight.x1*vr.w, ry1=vr.y+ropeRight.y1*vr.h;
+    const rx2=vr.x+ropeRight.x2*vr.w, ry2=vr.y+ropeRight.y2*vr.h;
 
-      // Left rope: cyan glow
-      lx.save();
-      lx.strokeStyle='rgba(0,229,255,0.3)';lx.lineWidth=6;lx.lineCap='round';
-      lx.beginPath();lx.moveTo(tl,topPx);lx.lineTo(bl,botPx);lx.stroke();
-      lx.strokeStyle='rgba(0,229,255,0.8)';lx.lineWidth=2;
-      lx.beginPath();lx.moveTo(tl,topPx);lx.lineTo(bl,botPx);lx.stroke();
+    // Extend lines 30% beyond tapped points in each direction
+    const ext=0.3;
+    function extendLine(ax,ay,bx,by){
+      const dx=bx-ax, dy=by-ay;
+      return{x1:ax-dx*ext, y1:ay-dy*ext, x2:bx+dx*ext, y2:by+dy*ext};
+    }
+    const lExt=extendLine(lx1,ly1,lx2,ly2);
+    const rExt=extendLine(rx1,ry1,rx2,ry2);
 
-      // Right rope: cyan glow
-      lx.strokeStyle='rgba(0,229,255,0.3)';lx.lineWidth=6;
-      lx.beginPath();lx.moveTo(tr,topPx);lx.lineTo(br,botPx);lx.stroke();
-      lx.strokeStyle='rgba(0,229,255,0.8)';lx.lineWidth=2;
-      lx.beginPath();lx.moveTo(tr,topPx);lx.lineTo(br,botPx);lx.stroke();
-      lx.restore();
+    // Clip to video area
+    lx.save();
+    lx.beginPath();lx.rect(vr.x,vr.y,vr.w,vr.h);lx.clip();
+
+    // Left rope: cyan glow
+    lx.strokeStyle='rgba(0,229,255,0.25)';lx.lineWidth=6;lx.lineCap='round';
+    lx.beginPath();lx.moveTo(lExt.x1,lExt.y1);lx.lineTo(lExt.x2,lExt.y2);lx.stroke();
+    lx.strokeStyle='rgba(0,229,255,0.7)';lx.lineWidth=2;
+    lx.beginPath();lx.moveTo(lExt.x1,lExt.y1);lx.lineTo(lExt.x2,lExt.y2);lx.stroke();
+
+    // Right rope: cyan glow
+    lx.strokeStyle='rgba(0,229,255,0.25)';lx.lineWidth=6;
+    lx.beginPath();lx.moveTo(rExt.x1,rExt.y1);lx.lineTo(rExt.x2,rExt.y2);lx.stroke();
+    lx.strokeStyle='rgba(0,229,255,0.7)';lx.lineWidth=2;
+    lx.beginPath();lx.moveTo(rExt.x1,rExt.y1);lx.lineTo(rExt.x2,rExt.y2);lx.stroke();
+
+    lx.restore();
+    {
+      // For swatch positioning, compute lane center at water top
+      const topB=getLaneBoundsAtY(waterYmin);
+      const topPx=vr.y+waterYmin*vr.h;
+      const tl=topB?vr.x+topB.xLeft*vr.w:lx1;
+      const tr=topB?vr.x+topB.xRight*vr.w:rx1;
       // Show swimmer color swatch near top of lane
       if(swimmerColor){
         const sx2=(tl+tr)/2, sy2=topPx+12;
@@ -1466,15 +1487,10 @@ async function scanVideo(){
           const usePerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
 
           if(camMode==='endon'){
-            // === DYNAMIC ROPE DETECTION ===
-            // Track lane ropes every 2nd frame for continuous camera compensation.
-            if(usePerspective && i%2===0){
-              const ropes=detectRopesInFrame(frameData,sw,sh);
-              if(ropes){
-                liveRopeLeft=ropes.left;
-                liveRopeRight=ropes.right;
-              }
-            }
+            // Dynamic rope detection disabled — it was finding wrong ropes
+            // and overriding the user's tapped lane selection.
+            // The user's 4-tap rope positions + camera shift compensation
+            // are more reliable than per-frame rope re-detection.
 
             // ===== ENDON LEADING-EDGE TRACKER =====
             // Instead of finding the centroid of all motion (which gets pulled by splash),
