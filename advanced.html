@@ -1349,10 +1349,7 @@ async function scanVideo(){
               colorProfile[bi]=pxCount>0?rowColor/pxCount:0;
             }
 
-            // Record total lane motion energy for this frame (wall detection uses this)
-            let totalLaneEnergy=0;
-            for(let bi=0;bi<numBins;bi++) totalLaneEnergy+=motionProfile[bi];
-            laneMotionEnergy.push({time:t,energy:numBins>0?totalLaneEnergy/numBins:0});
+            // (lane motion energy recording moved AFTER zoom detection — see below)
 
             // Smooth the profiles (±3 bins)
             const smooth=function(arr){
@@ -1442,6 +1439,12 @@ async function scanVideo(){
               waterYmax+=bestShift/sh;
               waterYmin=Math.max(0,Math.min(1,waterYmin));
               waterYmax=Math.max(0,Math.min(1,waterYmax));
+
+              // Record zoom frame energy marked as zoom (excluded from wall detection baseline)
+              let totalLaneEnergyZoom=0;
+              for(let bi=0;bi<numBins;bi++) totalLaneEnergyZoom+=motionProfile[bi];
+              laneMotionEnergy.push({time:t,energy:numBins>0?totalLaneEnergyZoom/numBins:0,isZoom:true});
+
             } else {
 
             // Determine swim direction from previous positions to find leading edge
@@ -1505,6 +1508,12 @@ async function scanVideo(){
             } else {
               rawDisplacements.push({time:t,posX:(swimmerY-waterTop)/waterRange});
             }
+
+            // Record lane motion energy for non-zoom frames
+            let totalLaneEnergy=0;
+            for(let bi=0;bi<numBins;bi++) totalLaneEnergy+=motionProfile[bi];
+            laneMotionEnergy.push({time:t,energy:numBins>0?totalLaneEnergy/numBins:0,isZoom:false});
+
             } // end zoom/pan else
 
           } else {
@@ -2655,19 +2664,30 @@ function detectWallTurns(rawDisplacements,sampleFps){
   const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
 
   // === PRIMARY: Motion energy dip detection ===
-  // Smooth lane motion energy with wide window
+  // Smooth lane motion energy with wide window, excluding zoom frames
   const eArr=laneMotionEnergy.map(function(d){return d.energy});
+  const isZoom=laneMotionEnergy.map(function(d){return d.isZoom||false});
   const eSmoothR=5; // ±5 frames (~0.67s at 15fps)
   const eSmooth=eArr.map(function(_,i){
     const lo=Math.max(0,i-eSmoothR),hi=Math.min(eArr.length-1,i+eSmoothR);
-    let s=0,c=0;for(let j=lo;j<=hi;j++){s+=eArr[j];c++}
-    return s/c;
+    let s=0,c=0;
+    for(let j=lo;j<=hi;j++){
+      if(!isZoom[j]){s+=eArr[j];c++}
+    }
+    // If all neighbors are zoom frames, fall back to including them
+    if(c===0){for(let j=lo;j<=hi;j++){s+=eArr[j];c++}}
+    return c>0?s/c:0;
   });
 
-  // Compute swimming baseline: median of the top 50% of energy values
-  // (excludes turns/starts where energy is low)
-  const eSorted=eSmooth.slice().sort(function(a,b){return a-b});
-  const swimBaseline=eSorted[Math.floor(eSorted.length*0.75)]||1;
+  // Compute swimming baseline: median of the top 50% of NON-ZOOM energy values
+  // (excludes turns/starts where energy is low, and zoom frames which inflate energy)
+  const nonZoomEnergies=[];
+  for(let i=0;i<eSmooth.length;i++){
+    if(!isZoom[i]) nonZoomEnergies.push(eSmooth[i]);
+  }
+  if(nonZoomEnergies.length===0) for(let i=0;i<eSmooth.length;i++) nonZoomEnergies.push(eSmooth[i]);
+  nonZoomEnergies.sort(function(a,b){return a-b});
+  const swimBaseline=nonZoomEnergies[Math.floor(nonZoomEnergies.length*0.75)]||1;
   // A wall touch = energy drops below 40% of swimming baseline for ≥2 frames
   const dipThresh=swimBaseline*0.40;
 
@@ -2677,6 +2697,7 @@ function detectWallTurns(rawDisplacements,sampleFps){
   for(let i=0;i<eSmooth.length;i++){
     const t=laneMotionEnergy[i]?laneMotionEnergy[i].time:i/sampleFps;
     if(t-raceStart<minTimeToFirstWall) continue;
+    if(isZoom[i]) continue; // skip zoom/pan frames — not real motion data
     if(eSmooth[i]<dipThresh){
       if(!inDip){inDip=true;dipStart=i}
     } else {
@@ -2726,10 +2747,12 @@ function detectWallTurns(rawDisplacements,sampleFps){
   // Energy drops from swimming level and NEVER recovers (unlike a turn where it does).
   // Detect finish as the onset of permanent deceleration — the "knee" where energy
   // transitions from swimming level to sustained low.
-  const expectedTurnsDip=numLaps-1; // total wall touches including finish
-  const detectedMidRaceTurns=dipRegions.length;
+  // Total wall touches = numLaps: (numLaps-1) mid-race turns + 1 finish
+  const expectedWallTouches=numLaps;
+  const detectedDips=dipRegions.length;
 
-  if(detectedMidRaceTurns>0 && detectedMidRaceTurns<expectedTurnsDip){
+  // Always try to detect finish if we have at least one dip (turn) but fewer than total expected
+  if(detectedDips>0 && detectedDips<expectedWallTouches){
     // We're missing walls — likely the finish. Try to detect it.
     const lastTurn=dipRegions[dipRegions.length-1];
     const lastTurnIdx=lastTurn.index;
@@ -2775,27 +2798,59 @@ function detectWallTurns(rawDisplacements,sampleFps){
         }
       }
 
+      // Also try position-based finish: swimmer reaches extreme position and velocity drops
+      if(finishIdx<0 && rawDisplacements.length>20){
+        const searchPosStart=Math.floor(searchStartTime*sampleFps);
+        for(let i=Math.max(searchPosStart,10);i<rawDisplacements.length-5;i++){
+          const pos=rawDisplacements[i].posX;
+          const posTime=rawDisplacements[i].time;
+          // Swimmer near a wall (position < 0.08 or > 0.92)
+          if(pos<0.08||pos>0.92){
+            // Check velocity drops (swimmer stops)
+            let velBefore=0,velAfter=0;
+            const velWindow=Math.min(5,Math.floor(sampleFps*0.5));
+            for(let k=Math.max(0,i-velWindow);k<i;k++){
+              velBefore+=Math.abs(rawDisplacements[k+1].posX-rawDisplacements[k].posX);
+            }
+            for(let k=i;k<Math.min(rawDisplacements.length-1,i+velWindow);k++){
+              velAfter+=Math.abs(rawDisplacements[k+1].posX-rawDisplacements[k].posX);
+            }
+            if(velWindow>0){velBefore/=velWindow;velAfter/=velWindow}
+            if(velBefore>0.001 && velAfter<velBefore*0.3){
+              // Position near wall + velocity drops by 70% = finish
+              let nearestEIdx=0,nearestDt=Infinity;
+              for(let k=0;k<laneMotionEnergy.length;k++){
+                const dt=Math.abs(laneMotionEnergy[k].time-posTime);
+                if(dt<nearestDt){nearestDt=dt;nearestEIdx=k}
+              }
+              finishIdx=nearestEIdx;
+              console.log('Finish detection: position-based finish at '+posTime.toFixed(2)+'s (pos='+pos.toFixed(3)+', vel drop '+velBefore.toFixed(4)+'→'+velAfter.toFixed(4)+')');
+              break;
+            }
+          }
+        }
+      }
+
       if(finishIdx>=0){
         const finishTime=laneMotionEnergy[finishIdx]?laneMotionEnergy[finishIdx].time:finishIdx/sampleFps;
         // Only add if it's far enough from the last turn
         if(finishTime-lastTurn.time>=minTimeBetweenTurns){
           dipRegions.push({time:finishTime,index:finishIdx,energy:eSmooth[finishIdx],isFinish:true});
-          console.log('Finish detection: pad touch at '+finishTime.toFixed(2)+'s (onset of permanent deceleration, energy='+eSmooth[finishIdx].toFixed(1)+' vs baseline='+swimBaseline.toFixed(1)+')');
+          console.log('Finish detection: pad touch at '+finishTime.toFixed(2)+'s (energy='+eSmooth[finishIdx].toFixed(1)+' vs baseline='+swimBaseline.toFixed(1)+')');
         }
       } else {
         console.log('Finish detection: could not find permanent deceleration after last turn at '+lastTurn.time.toFixed(2)+'s');
       }
     }
-  } else if(detectedMidRaceTurns===0){
-    // No dips at all — for short races (50 SCY = 2 laps, 1 expected wall = finish only)
-    // Try to detect the finish as the onset of permanent deceleration from swimming level
+  } else if(detectedDips===0){
+    // No dips at all — try to detect the finish as permanent deceleration
     const searchStartTime=raceStart+minTimeToFirstWall;
     let searchStartIdx=-1;
     for(let i=0;i<laneMotionEnergy.length;i++){
       if(laneMotionEnergy[i].time>=searchStartTime){searchStartIdx=i;break}
     }
 
-    if(searchStartIdx>=0 && expectedTurnsDip===1){
+    if(searchStartIdx>=0 && expectedWallTouches>=1){
       // Single-lap race to far wall (e.g., 50 SCY). Only wall = finish.
       const finishDropThresh=swimBaseline*0.60;
       const sustainedFrames=Math.max(Math.floor(sampleFps*2),10);
@@ -2938,7 +2993,8 @@ function detectWallTurns(rawDisplacements,sampleFps){
     const nextTurnI=ti<rawTurns.length-1?rawTurns[ti+1].index:smoothPos.length-1;
 
     // Check if this is the finish touch (last wall, marked by finish detection)
-    const isFinish=t.isFinish||(ti===rawTurns.length-1 && ti===expectedTurns-1);
+    // Last detected wall touch is the finish, or any touch explicitly marked as finish
+    const isFinish=t.isFinish||(ti===rawTurns.length-1 && rawTurns.length>=2);
     const wallType=isStartWall?'start':'far';
     const wallLabel=isFinish?'Finish':(isStartWall?'Start Wall':'Far Wall');
 
