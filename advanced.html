@@ -1117,40 +1117,29 @@ function drawLaneOverlay(){
   }
 
   if(ropeLeft&&ropeRight){
-    // Perspective lane: draw trapezoid clipped to water surface Y bounds
+    // Highlight lane ropes as glowing lines (no trapezoid, no darkening)
     const topB=getLaneBoundsAtY(waterYmin), botB=getLaneBoundsAtY(waterYmax);
     if(topB&&botB){
       const topPx=vr.y+waterYmin*vr.h, botPx=vr.y+waterYmax*vr.h;
       const tl=vr.x+topB.xLeft*vr.w, tr=vr.x+topB.xRight*vr.w;
       const bl=vr.x+botB.xLeft*vr.w, br=vr.x+botB.xRight*vr.w;
-      // Darken outside the trapezoid using clipping
+
+      // Left rope: cyan glow
       lx.save();
-      lx.fillStyle='rgba(0,0,0,0.5)';
-      lx.beginPath();
-      lx.rect(0,0,elW,elH);
-      // Cut out the trapezoid (counter-clockwise for even-odd)
-      lx.moveTo(tl,topPx);lx.lineTo(tr,topPx);lx.lineTo(br,botPx);lx.lineTo(bl,botPx);lx.closePath();
-      lx.fill('evenodd');
+      lx.strokeStyle='rgba(0,229,255,0.3)';lx.lineWidth=6;lx.lineCap='round';
+      lx.beginPath();lx.moveTo(tl,topPx);lx.lineTo(bl,botPx);lx.stroke();
+      lx.strokeStyle='rgba(0,229,255,0.8)';lx.lineWidth=2;
+      lx.beginPath();lx.moveTo(tl,topPx);lx.lineTo(bl,botPx);lx.stroke();
+
+      // Right rope: cyan glow
+      lx.strokeStyle='rgba(0,229,255,0.3)';lx.lineWidth=6;
+      lx.beginPath();lx.moveTo(tr,topPx);lx.lineTo(br,botPx);lx.stroke();
+      lx.strokeStyle='rgba(0,229,255,0.8)';lx.lineWidth=2;
+      lx.beginPath();lx.moveTo(tr,topPx);lx.lineTo(br,botPx);lx.stroke();
       lx.restore();
-      // Draw trapezoid outline
-      lx.strokeStyle='rgba(0,229,255,0.6)';lx.lineWidth=2;lx.setLineDash([6,4]);
-      lx.beginPath();lx.moveTo(tl,topPx);lx.lineTo(tr,topPx);lx.lineTo(br,botPx);lx.lineTo(bl,botPx);lx.closePath();lx.stroke();
-      lx.setLineDash([]);
-      lx.fillStyle='rgba(0,229,255,0.8)';lx.font='bold 11px IBM Plex Mono';lx.textAlign='left';
-      lx.fillText('SELECTED LANE',(tl+tr)/2-40,topPx+14);
-      // Show vanishing point if computed
-      if(vanishPt){
-        const vpx=vr.x+vanishPt.x*vr.w, vpy=vr.y+vanishPt.y*vr.h;
-        lx.strokeStyle='rgba(255,152,0,0.7)';lx.lineWidth=1;lx.setLineDash([2,2]);
-        lx.beginPath();lx.moveTo(vpx-8,vpy);lx.lineTo(vpx+8,vpy);lx.stroke();
-        lx.beginPath();lx.moveTo(vpx,vpy-8);lx.lineTo(vpx,vpy+8);lx.stroke();
-        lx.setLineDash([]);
-        lx.fillStyle='rgba(255,152,0,0.8)';lx.font='9px IBM Plex Mono';
-        lx.fillText('VP',vpx+10,vpy+3);
-      }
-      // Show swimmer color swatch if sampled
+      // Show swimmer color swatch near top of lane
       if(swimmerColor){
-        const sx2=(tl+tr)/2+30, sy2=topPx+10;
+        const sx2=(tl+tr)/2, sy2=topPx+12;
         lx.fillStyle='rgb('+swimmerColor.rgb.r+','+swimmerColor.rgb.g+','+swimmerColor.rgb.b+')';
         lx.beginPath();lx.arc(sx2,sy2,5,0,Math.PI*2);lx.fill();
         lx.strokeStyle='#fff';lx.lineWidth=1;lx.beginPath();lx.arc(sx2,sy2,5,0,Math.PI*2);lx.stroke();
