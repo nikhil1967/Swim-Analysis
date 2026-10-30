@@ -369,6 +369,11 @@ select.setup-input{-webkit-appearance:none;appearance:none;background:rgba(255,2
 </div>
 
 <canvas id="sc" style="display:none"></canvas>
+<canvas id="pose-canvas" width="256" height="256" style="display:none"></canvas>
+
+<!-- TensorFlow.js + MoveNet pose detection -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.22.0/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 
 <script>
 const Y2M=0.9144,M2Y=1/Y2M,FT2M=0.3048,IN2M=0.0254;
@@ -401,6 +406,132 @@ let strokeDetectOn=true;
 let swimmerColor=null; // {hues:[], sats:[], vals:[], rgb:{r,g,b}} — color signature
 let selectingSwimmer=false; // true when waiting for cap tap
 let vanishPt=null; // {x,y} — perspective vanishing point from rope line intersection
+
+// === MoveNet Pose Detection ===
+let poseDetector=null; // MoveNet Thunder detector instance
+let poseModelLoading=false;
+let poseModelReady=false;
+const poseCanvas=document.getElementById('pose-canvas');
+const poseCtx=poseCanvas?poseCanvas.getContext('2d'):null;
+
+// COCO keypoint indices for MoveNet (17 keypoints)
+const KP={
+  NOSE:0, LEFT_EYE:1, RIGHT_EYE:2, LEFT_EAR:3, RIGHT_EAR:4,
+  LEFT_SHOULDER:5, RIGHT_SHOULDER:6, LEFT_ELBOW:7, RIGHT_ELBOW:8,
+  LEFT_WRIST:9, RIGHT_WRIST:10, LEFT_HIP:11, RIGHT_HIP:12,
+  LEFT_KNEE:13, RIGHT_KNEE:14, LEFT_ANKLE:15, RIGHT_ANKLE:16
+};
+
+async function loadPoseModel(){
+  if(poseModelReady||poseModelLoading) return poseModelReady;
+  poseModelLoading=true;
+  try{
+    // Ensure WebGL backend is ready
+    await tf.setBackend('webgl');
+    await tf.ready();
+    const model=poseDetection.SupportedModels.MoveNet;
+    poseDetector=await poseDetection.createDetector(model,{
+      modelType:poseDetection.movenet.modelType.SINGLEPOSE_THUNDER
+    });
+    poseModelReady=true;
+    console.log('MoveNet Thunder loaded successfully');
+  }catch(e){
+    console.warn('MoveNet failed to load, falling back to color+motion tracker:',e);
+    poseModelReady=false;
+  }
+  poseModelLoading=false;
+  return poseModelReady;
+}
+
+// Run pose detection on a canvas (returns keypoints array or null)
+async function detectPose(canvas){
+  if(!poseDetector||!poseModelReady) return null;
+  try{
+    const poses=await poseDetector.estimatePoses(canvas);
+    if(poses&&poses.length>0&&poses[0].keypoints){
+      return poses[0].keypoints; // [{x,y,score,name}, ...]
+    }
+  }catch(e){
+    // Silently fail — fall back to heuristic tracker
+  }
+  return null;
+}
+
+// Extract swimmer Y position from keypoints (end-on camera: Y = distance from camera)
+// Returns {y: normalized 0-1, confidence: 0-1, wristY: pixel y of leading wrist, method: string} or null
+function getSwimmerYFromKeypoints(keypoints,canvasW,canvasH,waterYmin,waterYmax){
+  if(!keypoints) return null;
+
+  // Relevant keypoints for swimmer tracking
+  const nose=keypoints[KP.NOSE];
+  const lWrist=keypoints[KP.LEFT_WRIST];
+  const rWrist=keypoints[KP.RIGHT_WRIST];
+  const lAnkle=keypoints[KP.LEFT_ANKLE];
+  const rAnkle=keypoints[KP.RIGHT_ANKLE];
+  const lShoulder=keypoints[KP.LEFT_SHOULDER];
+  const rShoulder=keypoints[KP.RIGHT_SHOULDER];
+
+  // Confidence threshold for a keypoint to be usable
+  const minConf=0.15;
+
+  // Collect all visible body keypoints for a robust center estimate
+  const bodyParts=[];
+
+  // Wrists are most valuable for wall touch detection
+  if(lWrist.score>minConf) bodyParts.push({y:lWrist.y/canvasH,w:3,name:'lwrist'});
+  if(rWrist.score>minConf) bodyParts.push({y:rWrist.y/canvasH,w:3,name:'rwrist'});
+
+  // Head/nose for general tracking
+  if(nose.score>minConf) bodyParts.push({y:nose.y/canvasH,w:2,name:'nose'});
+
+  // Shoulders
+  if(lShoulder.score>minConf) bodyParts.push({y:lShoulder.y/canvasH,w:1.5,name:'lshoulder'});
+  if(rShoulder.score>minConf) bodyParts.push({y:rShoulder.y/canvasH,w:1.5,name:'rshoulder'});
+
+  // Ankles (useful for flip turn detection — feet touch wall)
+  if(lAnkle.score>minConf) bodyParts.push({y:lAnkle.y/canvasH,w:1,name:'lankle'});
+  if(rAnkle.score>minConf) bodyParts.push({y:rAnkle.y/canvasH,w:1,name:'rankle'});
+
+  if(bodyParts.length===0) return null;
+
+  // For wall touch: the LEADING body part (closest to wall) matters most
+  // In end-on view: swimming toward far wall = moving UP in frame (smaller Y)
+  //                 swimming toward near wall = moving DOWN (larger Y)
+  // Find the extremes: the wrist/hand reaching furthest toward each wall
+  let minY=1,maxY=0;
+  bodyParts.forEach(function(p){
+    if(p.y<minY) minY=p.y;
+    if(p.y>maxY) maxY=p.y;
+  });
+
+  // Weighted centroid of all visible parts (wrists weighted highest)
+  let totalW=0,weightedY=0;
+  bodyParts.forEach(function(p){
+    totalW+=p.w;
+    weightedY+=p.y*p.w;
+  });
+  const centroidY=weightedY/totalW;
+
+  // Average confidence of detected parts
+  const avgConf=bodyParts.reduce(function(s,p){return s+1},0)/7; // fraction of 7 key body parts visible
+
+  // Leading wrist Y (for wall touch precision)
+  let leadWristY=null;
+  const wrists=bodyParts.filter(function(p){return p.name==='lwrist'||p.name==='rwrist'});
+  if(wrists.length>0){
+    // The wrist closest to each wall edge
+    leadWristY={min:Math.min.apply(null,wrists.map(function(w){return w.y})),
+                max:Math.max.apply(null,wrists.map(function(w){return w.y}))};
+  }
+
+  return{
+    y:centroidY,
+    confidence:Math.min(1,avgConf*2),
+    leadWristY:leadWristY,
+    numParts:bodyParts.length,
+    method:'movenet'
+  };
+}
 
 // Course definitions: pool length per lap (wall to wall)
 const COURSES={SCY:{len:25,unit:'yd',label:'SCY 25yd'},LCM:{len:50,unit:'m',label:'LCM 50m'},SCM:{len:25,unit:'m',label:'SCM 25m'}};
@@ -1231,7 +1362,14 @@ async function scanVideo(){
   scanning=true;scanned=false;flowData=[];motionData=[];
 
   const btn=document.getElementById('scan-btn');
-  btn.className='scan-btn scanning';btn.textContent='Scanning...';btn.disabled=true;
+  btn.className='scan-btn scanning';btn.textContent='Loading ML model...';btn.disabled=true;
+
+  // Load MoveNet Thunder (async, ~2s first time, cached after)
+  const usePose=await loadPoseModel();
+  if(usePose) console.log('MoveNet Thunder active — fusing pose + color+motion tracking');
+  else console.log('MoveNet unavailable — using color+motion tracker only');
+
+  btn.textContent='Scanning...';
   V.pause();
 
   const sampleFps=20; // 20fps: sub-frame interpolation still gives ~±8ms precision
@@ -1282,6 +1420,24 @@ async function scanVideo(){
 
     sx.drawImage(V,0,0,sw,sh);
     const centerData=sx.getImageData(centerX,centerY,centerW,centerH).data;
+
+    // === MoveNet Pose Detection (every 3rd frame to balance accuracy vs speed) ===
+    let poseResult=null;
+    if(usePose && i>0 && i%3===0 && camMode==='endon'){
+      // Draw frame to 256×256 pose canvas for MoveNet input
+      poseCtx.drawImage(V,0,0,256,256);
+      const kps=await detectPose(poseCanvas);
+      if(kps){
+        // Map keypoints from 256×256 pose canvas back to sw×sh scan canvas
+        const scaledKps=kps.map(function(kp){
+          return{x:kp.x*(sw/256),y:kp.y*(sh/256),score:kp.score,name:kp.name};
+        });
+        const hasPerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
+        const yS=hasPerspective?Math.max(0,Math.floor(waterYmin*sh)):0;
+        const yE=hasPerspective?Math.min(sh,Math.floor(waterYmax*sh)):sh;
+        poseResult=getSwimmerYFromKeypoints(scaledKps,sw,sh,yS,yE);
+      }
+    }
 
     if(i>0){
       if(camMode==='fixed'||camMode==='endon'){
@@ -1602,13 +1758,39 @@ async function scanVideo(){
                 }
               }
 
+              // Color+motion tracker result
+              let heuristicY=-1, heuristicConf=0;
               if(totalWeight>0 && peakScore>0.01){
-                swimmerY=weightedSum/totalWeight;
+                heuristicY=weightedSum/totalWeight;
+                heuristicConf=Math.min(1,peakScore*5);
+              }
+
+              // === FUSE MoveNet pose + color/motion tracker ===
+              if(poseResult && poseResult.confidence>0.2 && heuristicConf>0.01){
+                // Both signals available: weighted blend
+                // MoveNet wrist positions give precise wall-touch location
+                // Color+motion gives continuous tracking even underwater
+                const poseY=poseResult.y*sh; // convert normalized to pixel Y
+                const pw=Math.min(0.7, poseResult.confidence); // pose weight (cap at 70%)
+                const hw=1-pw;
+                swimmerY=pw*poseY + hw*heuristicY;
                 trackerY=swimmerY;
-                trackerConf=Math.min(1,peakScore*5);
+                trackerConf=Math.min(1, Math.max(heuristicConf, poseResult.confidence));
+                trackerLostFrames=0;
+              } else if(poseResult && poseResult.confidence>0.2){
+                // Only MoveNet (heuristic lost track — e.g. underwater after turn)
+                swimmerY=poseResult.y*sh;
+                trackerY=swimmerY;
+                trackerConf=poseResult.confidence;
+                trackerLostFrames=0;
+              } else if(heuristicConf>0.01){
+                // Only heuristic (MoveNet didn't run this frame or low confidence)
+                swimmerY=heuristicY;
+                trackerY=swimmerY;
+                trackerConf=heuristicConf;
                 trackerLostFrames=0;
               } else {
-                // Lost track — hold last known position (decaying confidence)
+                // Both lost — hold last known position (decaying confidence)
                 swimmerY=trackerY>=0?trackerY:(yStart+yEnd)/2;
                 trackerConf*=0.8;
                 trackerLostFrames++;
@@ -1636,9 +1818,22 @@ async function scanVideo(){
               }
               const newRel=swimmerY-waterTop;
               const smoothed=emaAlpha*newRel+(1-emaAlpha)*prevPosY;
-              rawDisplacements.push({time:t,posX:smoothed/waterRange});
+              const disp={time:t,posX:smoothed/waterRange};
+              // Attach MoveNet wrist data for sub-frame wall touch refinement
+              if(poseResult && poseResult.leadWristY){
+                disp.wristMin=(poseResult.leadWristY.min*sh-waterTop)/waterRange;
+                disp.wristMax=(poseResult.leadWristY.max*sh-waterTop)/waterRange;
+                disp.poseConf=poseResult.confidence;
+              }
+              rawDisplacements.push(disp);
             } else {
-              rawDisplacements.push({time:t,posX:(swimmerY-waterTop)/waterRange});
+              const disp={time:t,posX:(swimmerY-waterTop)/waterRange};
+              if(poseResult && poseResult.leadWristY){
+                disp.wristMin=(poseResult.leadWristY.min*sh-waterTop)/waterRange;
+                disp.wristMax=(poseResult.leadWristY.max*sh-waterTop)/waterRange;
+                disp.poseConf=poseResult.confidence;
+              }
+              rawDisplacements.push(disp);
             }
 
             // Record lane motion energy for non-zoom frames
@@ -1945,7 +2140,9 @@ async function scanVideo(){
   scanning=false;scanned=true;
   btn.className='scan-btn';btn.textContent='🔍 Rescan';btn.disabled=false;
   progress.style.width='0%';
-  document.getElementById('scan-st').textContent='Done · '+(camMode==='fixed'?'Side view':camMode==='endon'?'Across pool':'Following')+' mode';
+  const modeLabel=camMode==='fixed'?'Side view':camMode==='endon'?'Across pool':'Following';
+  const mlLabel=usePose?' + ML pose':'';
+  document.getElementById('scan-st').textContent='Done · '+modeLabel+' mode'+mlLabel;
   document.getElementById('xa-tog').style.display='flex';
   document.getElementById('motion-box').style.display=strokeDetectOn?'block':'none';
 
@@ -2925,6 +3122,37 @@ function detectWallTurns(rawDisplacements,sampleFps){
                 }
               }
             }
+            // === WRIST-BASED REFINEMENT ===
+            // If MoveNet detected wrist positions near this wall touch,
+            // use the leading wrist for more precise timing.
+            // Wrist reaches wall ~0.5-1.0 frames before cap/body centroid.
+            const wristSearchR=3; // search ±3 frames around extremum
+            let bestWristDist=Infinity;
+            let wristWallTime=null;
+            for(let wk=Math.max(0,extremeI-wristSearchR);wk<=Math.min(rawDisplacements.length-1,extremeI+wristSearchR);wk++){
+              const rd=rawDisplacements[wk];
+              if(rd.poseConf && rd.poseConf>0.2){
+                // Check which wrist is leading (closer to wall)
+                // Near top wall (posX→0): wristMin is leading
+                // Near bottom wall (posX→1): wristMax is leading
+                const nearTop=smoothPos[extremeI]<0.3;
+                const wY=nearTop?rd.wristMin:rd.wristMax;
+                if(wY!==undefined){
+                  const wallEdge=nearTop?0:1;
+                  const dist=Math.abs(wY-wallEdge);
+                  if(dist<bestWristDist){
+                    bestWristDist=dist;
+                    wristWallTime=rd.time;
+                  }
+                }
+              }
+            }
+            // If wrist-based time found and within ±1 frame of parabolic estimate, use it
+            if(wristWallTime!==null && Math.abs(wristWallTime-wallTime)<1.5/sampleFps){
+              // Blend: 60% wrist (direct contact), 40% parabolic (smooth curve peak)
+              wallTime=wristWallTime*0.6+wallTime*0.4;
+            }
+
             if(wallTime-lastPosWallTime>=minTimeBetweenTurns){
               positionTurns.push({time:wallTime,posX:smoothPos[extremeI],index:extremeI});
               lastPosWallTime=wallTime;
