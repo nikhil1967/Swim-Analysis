@@ -488,6 +488,7 @@ let liveRopeLeft=null, liveRopeRight=null; // current-frame rope X at each scann
 let cameraShiftX=0, cameraShiftY=0; // accumulated shift in normalized coords (0-1)
 // Sampled rope color signatures from initial tap points
 let ropeColorLeft=null, ropeColorRight=null; // {colors:[{r,g,b},...], waterColor:{r,g,b}}
+let lastSampleFps=30; // stored from most recent scan for use outside scan function
 
 // Sample rope colors from the tap points — called once after 4 rope taps
 function sampleRopeColors(){
@@ -1134,7 +1135,7 @@ function validateOfficialTime(){
 
       // Recalibrate speed from walls with corrected beep
       if(wallTouches.length>0){
-        flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,1/15);
+        flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,1/lastSampleFps);
       }
       showTimingEvents();
       drawGraph();drawMotionGraph();
@@ -1234,6 +1235,7 @@ async function scanVideo(){
   V.pause();
 
   const sampleFps=30;
+  lastSampleFps=sampleFps; // store globally for functions called after scan
   const totalSamples=Math.floor(V.duration*sampleFps);
   const sw=320,sh=180;
   sC.width=sw;sC.height=sh;
@@ -3562,7 +3564,7 @@ function startManualBeep(){
     drawGraph();drawMotionGraph();
     // Re-run lap split calculations
     if(wallTouches.length>0){
-      const dt=1/15;
+      const dt=1/lastSampleFps;
       flowData=calibrateSpeedFromWalls(flowData,wallTouches,beepTime,blockDepartTime,dt);
       showTimingEvents();
     }
