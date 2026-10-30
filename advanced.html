@@ -2650,11 +2650,11 @@ async function captureAudioFromVideo(durationSec){
   });
 }
 
-// ===== WALL TURN DETECTION — EVENT-BASED (motion energy dips) =====
-// Primary: detect dips in lane motion energy (swimmer pauses at wall)
-// Secondary: confirm with velocity reversal from position data
-// This approach is zoom-robust: motion energy drops when swimmer stops,
-// regardless of camera zoom/pan.
+// ===== WALL TURN DETECTION — MULTI-METHOD =====
+// Method A (endon primary): Position extrema — swimmer reaches wall zone
+// Method B: Motion energy dips — swimmer pauses at wall
+// Method C (fallback): Velocity reversals — direction changes
+// Results merged: best method's count wins, supplemented by others.
 function detectWallTurns(rawDisplacements,sampleFps){
   if((camMode!=='fixed'&&camMode!=='endon')||rawDisplacements.length<20)return [];
 
@@ -2663,60 +2663,7 @@ function detectWallTurns(rawDisplacements,sampleFps){
   const minTimeToFirstWall=lapLen>=50?20:10;
   const raceStart=rawDisplacements.length>0?rawDisplacements[0].time:0;
 
-  // === PRIMARY: Motion energy dip detection ===
-  // Smooth lane motion energy with wide window, excluding zoom frames
-  const eArr=laneMotionEnergy.map(function(d){return d.energy});
-  const isZoom=laneMotionEnergy.map(function(d){return d.isZoom||false});
-  const eSmoothR=5; // ±5 frames (~0.67s at 15fps)
-  const eSmooth=eArr.map(function(_,i){
-    const lo=Math.max(0,i-eSmoothR),hi=Math.min(eArr.length-1,i+eSmoothR);
-    let s=0,c=0;
-    for(let j=lo;j<=hi;j++){
-      if(!isZoom[j]){s+=eArr[j];c++}
-    }
-    // If all neighbors are zoom frames, fall back to including them
-    if(c===0){for(let j=lo;j<=hi;j++){s+=eArr[j];c++}}
-    return c>0?s/c:0;
-  });
-
-  // Compute swimming baseline: median of the top 50% of NON-ZOOM energy values
-  // (excludes turns/starts where energy is low, and zoom frames which inflate energy)
-  const nonZoomEnergies=[];
-  for(let i=0;i<eSmooth.length;i++){
-    if(!isZoom[i]) nonZoomEnergies.push(eSmooth[i]);
-  }
-  if(nonZoomEnergies.length===0) for(let i=0;i<eSmooth.length;i++) nonZoomEnergies.push(eSmooth[i]);
-  nonZoomEnergies.sort(function(a,b){return a-b});
-  const swimBaseline=nonZoomEnergies[Math.floor(nonZoomEnergies.length*0.75)]||1;
-  // A wall touch = energy drops below 40% of swimming baseline for ≥2 frames
-  const dipThresh=swimBaseline*0.40;
-
-  // Find dip regions (low energy = swimmer at wall)
-  const dipRegions=[];
-  let inDip=false,dipStart=-1;
-  for(let i=0;i<eSmooth.length;i++){
-    const t=laneMotionEnergy[i]?laneMotionEnergy[i].time:i/sampleFps;
-    if(t-raceStart<minTimeToFirstWall) continue;
-    if(isZoom[i]) continue; // skip zoom/pan frames — not real motion data
-    if(eSmooth[i]<dipThresh){
-      if(!inDip){inDip=true;dipStart=i}
-    } else {
-      if(inDip){
-        // Dip ended — find the minimum energy point as the wall touch time
-        let minE=Infinity,minI=dipStart;
-        for(let j=dipStart;j<i;j++){
-          if(eSmooth[j]<minE){minE=eSmooth[j];minI=j}
-        }
-        const dipTime=laneMotionEnergy[minI]?laneMotionEnergy[minI].time:minI/sampleFps;
-        if(dipRegions.length===0||dipTime-dipRegions[dipRegions.length-1].time>minTimeBetweenTurns){
-          dipRegions.push({time:dipTime,index:minI,energy:minE});
-        }
-        inDip=false;
-      }
-    }
-  }
-
-  // === SECONDARY: Position-based velocity reversals (fallback/supplement) ===
+  // === Smooth position data (used by Methods A and C) ===
   const posArr=rawDisplacements.map(function(d){return d.posX});
   const smoothR=6;
   const smoothPos=posArr.map(function(_,i){
@@ -2735,29 +2682,224 @@ function detectWallTurns(rawDisplacements,sampleFps){
     return s/c;
   });
 
-  // === MERGE: use motion dips as primary, position reversals as confirmation ===
-  const minGap=Math.floor(sampleFps*minTimeBetweenTurns);
+  // === METHOD A: Position extrema detection (primary for endon) ===
+  // Swimmer must reach an extreme position at each wall — physics guarantees this.
+  // Independent of energy, camera zoom, or other swimmers.
+  const positionTurns=[];
+  if(camMode==='endon' && smoothPos.length>20){
+    // Determine position range from middle 80% of data (avoid start/end artifacts)
+    let posMin=Infinity,posMax=-Infinity;
+    const rStart=Math.floor(smoothPos.length*0.05);
+    const rEnd=Math.floor(smoothPos.length*0.95);
+    for(let i=rStart;i<rEnd;i++){
+      if(smoothPos[i]<posMin)posMin=smoothPos[i];
+      if(smoothPos[i]>posMax)posMax=smoothPos[i];
+    }
+    const posSpan=posMax-posMin;
 
-  if(dipRegions.length>0){
-    console.log('Wall detection: found '+dipRegions.length+' walls via motion energy dips (baseline='+swimBaseline.toFixed(1)+', thresh='+dipThresh.toFixed(1)+')');
+    if(posSpan>0.10){ // need meaningful movement range
+      // Wall zones: within 25% of range from each extreme
+      const wallZoneFrac=0.25;
+      const nearWallBound=posMin+posSpan*wallZoneFrac;
+      const farWallBound=posMax-posSpan*wallZoneFrac;
+      const posMid=posMin+posSpan/2;
+
+      // Scan for wall zone visits
+      let inWallZone=false,wallEntryI=-1,lastPosWallTime=-minTimeBetweenTurns*2;
+
+      for(let i=0;i<smoothPos.length;i++){
+        const t=rawDisplacements[i].time;
+        if(t-raceStart<minTimeToFirstWall)continue;
+
+        const atWall=smoothPos[i]<=nearWallBound||smoothPos[i]>=farWallBound;
+
+        if(atWall&&!inWallZone){
+          inWallZone=true;wallEntryI=i;
+        } else if(!atWall&&inWallZone){
+          // Left wall zone — record the wall touch at the most extreme position
+          if(wallEntryI>=0){
+            let extremeI=wallEntryI;
+            for(let j=wallEntryI;j<i;j++){
+              const dj=Math.abs(smoothPos[j]-posMid);
+              const de=Math.abs(smoothPos[extremeI]-posMid);
+              if(dj>de)extremeI=j;
+            }
+            const wallTime=rawDisplacements[extremeI].time;
+            if(wallTime-lastPosWallTime>=minTimeBetweenTurns){
+              positionTurns.push({time:wallTime,posX:smoothPos[extremeI],index:extremeI});
+              lastPosWallTime=wallTime;
+            }
+          }
+          inWallZone=false;
+        }
+      }
+
+      // If still in wall zone at end of data — likely the finish
+      if(inWallZone&&wallEntryI>=0){
+        let extremeI=wallEntryI;
+        for(let j=wallEntryI;j<smoothPos.length;j++){
+          const dj=Math.abs(smoothPos[j]-posMid);
+          const de=Math.abs(smoothPos[extremeI]-posMid);
+          if(dj>de)extremeI=j;
+        }
+        const wallTime=rawDisplacements[extremeI].time;
+        if(wallTime-lastPosWallTime>=minTimeBetweenTurns){
+          positionTurns.push({time:wallTime,posX:smoothPos[extremeI],index:extremeI,isFinish:true});
+        }
+      }
+
+      console.log('Method A (position extrema): '+positionTurns.length+' walls (range='+posMin.toFixed(3)+'-'+posMax.toFixed(3)+', zones <'+nearWallBound.toFixed(3)+' or >'+farWallBound.toFixed(3)+')');
+    }
   }
 
-  // === FINISH DETECTION ===
-  // The finish is different from a turn: swimmer touches pad then floats/drifts.
-  // Energy drops from swimming level and NEVER recovers (unlike a turn where it does).
-  // Detect finish as the onset of permanent deceleration — the "knee" where energy
-  // transitions from swimming level to sustained low.
-  // Total wall touches = numLaps: (numLaps-1) mid-race turns + 1 finish
+  // === METHOD B: Motion energy dip detection ===
+  // Smooth lane motion energy with wide window, excluding zoom frames
+  const eArr=laneMotionEnergy.map(function(d){return d.energy});
+  const isZoom=laneMotionEnergy.map(function(d){return d.isZoom||false});
+  const eSmoothR=5; // ±5 frames (~0.67s at 15fps)
+  const eSmooth=eArr.map(function(_,i){
+    const lo=Math.max(0,i-eSmoothR),hi=Math.min(eArr.length-1,i+eSmoothR);
+    let s=0,c=0;
+    for(let j=lo;j<=hi;j++){
+      if(!isZoom[j]){s+=eArr[j];c++}
+    }
+    if(c===0){for(let j=lo;j<=hi;j++){s+=eArr[j];c++}}
+    return c>0?s/c:0;
+  });
+
+  // Compute swimming baseline from NON-ZOOM energies (75th percentile)
+  const nonZoomEnergies=[];
+  for(let i=0;i<eSmooth.length;i++){
+    if(!isZoom[i]) nonZoomEnergies.push(eSmooth[i]);
+  }
+  if(nonZoomEnergies.length===0) for(let i=0;i<eSmooth.length;i++) nonZoomEnergies.push(eSmooth[i]);
+  nonZoomEnergies.sort(function(a,b){return a-b});
+  const swimBaseline=nonZoomEnergies[Math.floor(nonZoomEnergies.length*0.75)]||1;
+  const dipThresh=swimBaseline*0.40;
+
+  // Find dip regions
+  const dipRegions=[];
+  let inDip=false,dipStart=-1;
+  for(let i=0;i<eSmooth.length;i++){
+    const t=laneMotionEnergy[i]?laneMotionEnergy[i].time:i/sampleFps;
+    if(t-raceStart<minTimeToFirstWall) continue;
+    if(isZoom[i]) continue;
+    if(eSmooth[i]<dipThresh){
+      if(!inDip){inDip=true;dipStart=i}
+    } else {
+      if(inDip){
+        let minE=Infinity,minI=dipStart;
+        for(let j=dipStart;j<i;j++){
+          if(eSmooth[j]<minE){minE=eSmooth[j];minI=j}
+        }
+        const dipTime=laneMotionEnergy[minI]?laneMotionEnergy[minI].time:minI/sampleFps;
+        if(dipRegions.length===0||dipTime-dipRegions[dipRegions.length-1].time>minTimeBetweenTurns){
+          dipRegions.push({time:dipTime,index:minI,energy:minE});
+        }
+        inDip=false;
+      }
+    }
+  }
+
+  console.log('Method B (energy dips): '+dipRegions.length+' walls (baseline='+swimBaseline.toFixed(1)+', thresh='+dipThresh.toFixed(1)+')');
+
+  // === MERGE: Use the method that found the most walls ===
+  // For endon: prefer position extrema (immune to other-lane noise)
+  // Supplement with energy dips and velocity reversals
   const expectedWallTouches=numLaps;
-  const detectedDips=dipRegions.length;
+  const minGap=Math.floor(sampleFps*minTimeBetweenTurns);
 
-  // Always try to detect finish if we have at least one dip (turn) but fewer than total expected
-  if(detectedDips>0 && detectedDips<expectedWallTouches){
-    // We're missing walls — likely the finish. Try to detect it.
-    const lastTurn=dipRegions[dipRegions.length-1];
-    const lastTurnIdx=lastTurn.index;
+  // Convert dipRegions to turn format for merging
+  const energyTurns=dipRegions.map(function(d){
+    let bestI=0,bestDt=Infinity;
+    for(let i=0;i<rawDisplacements.length;i++){
+      const dt=Math.abs(rawDisplacements[i].time-d.time);
+      if(dt<bestDt){bestDt=dt;bestI=i}
+    }
+    return{time:d.time,posX:bestI<smoothPos.length?smoothPos[bestI]:0.5,index:bestI,isFinish:!!d.isFinish,source:'energy'};
+  });
 
-    // Search window: from minTimeBetweenTurns after last turn to end of data
+  // Method C: Velocity reversals (fallback)
+  const velTurns=[];
+  {
+    let lastTurnI=-minGap*2;
+    const minDisplacement=camMode==='endon'?0.10:0.05;
+    for(let i=1;i<sVel.length;i++){
+      if(sVel[i]*sVel[i-1]<0&&(i-lastTurnI)>minGap){
+        if(rawDisplacements[i].time-raceStart<minTimeToFirstWall)continue;
+        const rangeStart=Math.max(0,lastTurnI);
+        let displacement=0;
+        for(let j=rangeStart+1;j<=i;j++){
+          displacement+=Math.abs(smoothPos[j]-smoothPos[j-1]);
+        }
+        if(displacement>minDisplacement){
+          velTurns.push({time:rawDisplacements[i].time,posX:smoothPos[i],index:i,source:'velocity'});
+          lastTurnI=i;
+        }
+      }
+    }
+    console.log('Method C (velocity reversals): '+velTurns.length+' walls');
+  }
+
+  // Pick best primary set: whichever found the most (closest to expected)
+  let primarySet,primaryLabel;
+  const setA=positionTurns,setB=energyTurns,setC=velTurns;
+  const diffA=Math.abs(setA.length-expectedWallTouches);
+  const diffB=Math.abs(setB.length-expectedWallTouches);
+  const diffC=Math.abs(setC.length-expectedWallTouches);
+
+  if(camMode==='endon'&&setA.length>0&&(setA.length>=setB.length||diffA<=diffB)){
+    primarySet=setA;primaryLabel='position';
+  } else if(setB.length>=setC.length){
+    primarySet=setB;primaryLabel='energy';
+  } else {
+    primarySet=setC;primaryLabel='velocity';
+  }
+
+  // Start with primary set
+  const mergedTurns=primarySet.map(function(t){return{time:t.time,posX:t.posX,index:t.index,isFinish:!!t.isFinish,source:t.source||primaryLabel}});
+
+  // Supplement from other methods: add turns that don't overlap
+  var supplementSets=primaryLabel==='position'?[setB,setC]:(primaryLabel==='energy'?[setA,setC]:[setA,setB]);
+  for(var si=0;si<supplementSets.length;si++){
+    var sSet=supplementSets[si];
+    for(var ti=0;ti<sSet.length;ti++){
+      var st=sSet[ti].time;
+      var hasOverlap=false;
+      for(var mi=0;mi<mergedTurns.length;mi++){
+        if(Math.abs(mergedTurns[mi].time-st)<minTimeBetweenTurns*0.6){hasOverlap=true;break}
+      }
+      if(!hasOverlap){
+        mergedTurns.push({time:st,posX:sSet[ti].posX,index:sSet[ti].index,isFinish:!!sSet[ti].isFinish,source:sSet[ti].source||'supplement'});
+      }
+    }
+  }
+
+  // Sort by time
+  mergedTurns.sort(function(a,b){return a.time-b.time});
+
+  // For position-based turns, refine timing with nearby energy dips (±2s) if available
+  for(var ri=0;ri<mergedTurns.length;ri++){
+    if(mergedTurns[ri].source==='position'||mergedTurns[ri].source==='velocity'){
+      for(var di=0;di<dipRegions.length;di++){
+        if(Math.abs(dipRegions[di].time-mergedTurns[ri].time)<2.0){
+          mergedTurns[ri].time=dipRegions[di].time; // energy dip time is more precise
+          break;
+        }
+      }
+    }
+  }
+
+  console.log('Merged: '+mergedTurns.length+' walls (primary='+primaryLabel+', expected='+expectedWallTouches+')');
+
+  // === FINISH DETECTION ===
+  // If we have turns but fewer than expected, try to find the finish
+  const detectedWalls=mergedTurns.length;
+
+  if(detectedWalls>0 && detectedWalls<expectedWallTouches){
+    const lastTurn=mergedTurns[mergedTurns.length-1];
+
+    // Search window: from minTimeBetweenTurns after last turn to end
     const searchStartTime=lastTurn.time+minTimeBetweenTurns;
     let searchStartIdx=-1;
     for(let i=0;i<laneMotionEnergy.length;i++){
@@ -2765,32 +2907,22 @@ function detectWallTurns(rawDisplacements,sampleFps){
     }
 
     if(searchStartIdx>=0 && searchStartIdx<eSmooth.length-5){
-      // Look for the "knee" — the last frame at or near swimming baseline
-      // before energy drops permanently below a recovery threshold.
-      // Recovery threshold: if energy stays below 60% of baseline for the
-      // remainder of the race, swimmer has finished.
+      // Energy-based finish: permanent drop below 60% of baseline
       const finishDropThresh=swimBaseline*0.60;
-      const sustainedFrames=Math.max(Math.floor(sampleFps*2),10); // must stay low for ≥2s
+      const sustainedFrames=Math.max(Math.floor(sampleFps*2),10);
 
       let finishIdx=-1;
       for(let i=searchStartIdx;i<eSmooth.length-sustainedFrames;i++){
         if(eSmooth[i]<finishDropThresh){
-          // Check: does energy stay below threshold for the rest of the data
-          // (or at least sustainedFrames)?
           let staysLow=true;
           const checkEnd=Math.min(i+sustainedFrames,eSmooth.length);
           for(let j=i;j<checkEnd;j++){
             if(eSmooth[j]>=swimBaseline*0.75){staysLow=false;break}
           }
           if(staysLow){
-            // Found the permanent drop. Now walk backward to find the onset —
-            // the last frame that was still at swimming energy (the pad touch).
             let onsetIdx=i;
             for(let k=i-1;k>=Math.max(searchStartIdx,i-Math.floor(sampleFps*3));k--){
-              if(eSmooth[k]>=finishDropThresh){
-                onsetIdx=k;
-                break;
-              }
+              if(eSmooth[k]>=finishDropThresh){onsetIdx=k;break}
             }
             finishIdx=onsetIdx;
             break;
@@ -2798,15 +2930,13 @@ function detectWallTurns(rawDisplacements,sampleFps){
         }
       }
 
-      // Also try position-based finish: swimmer reaches extreme position and velocity drops
+      // Position-based finish fallback: extreme position + velocity drop
       if(finishIdx<0 && rawDisplacements.length>20){
         const searchPosStart=Math.floor(searchStartTime*sampleFps);
         for(let i=Math.max(searchPosStart,10);i<rawDisplacements.length-5;i++){
           const pos=rawDisplacements[i].posX;
           const posTime=rawDisplacements[i].time;
-          // Swimmer near a wall (position < 0.08 or > 0.92)
           if(pos<0.08||pos>0.92){
-            // Check velocity drops (swimmer stops)
             let velBefore=0,velAfter=0;
             const velWindow=Math.min(5,Math.floor(sampleFps*0.5));
             for(let k=Math.max(0,i-velWindow);k<i;k++){
@@ -2817,14 +2947,13 @@ function detectWallTurns(rawDisplacements,sampleFps){
             }
             if(velWindow>0){velBefore/=velWindow;velAfter/=velWindow}
             if(velBefore>0.001 && velAfter<velBefore*0.3){
-              // Position near wall + velocity drops by 70% = finish
               let nearestEIdx=0,nearestDt=Infinity;
               for(let k=0;k<laneMotionEnergy.length;k++){
                 const dt=Math.abs(laneMotionEnergy[k].time-posTime);
                 if(dt<nearestDt){nearestDt=dt;nearestEIdx=k}
               }
               finishIdx=nearestEIdx;
-              console.log('Finish detection: position-based finish at '+posTime.toFixed(2)+'s (pos='+pos.toFixed(3)+', vel drop '+velBefore.toFixed(4)+'→'+velAfter.toFixed(4)+')');
+              console.log('Finish: position-based at '+posTime.toFixed(2)+'s (pos='+pos.toFixed(3)+')');
               break;
             }
           }
@@ -2833,17 +2962,19 @@ function detectWallTurns(rawDisplacements,sampleFps){
 
       if(finishIdx>=0){
         const finishTime=laneMotionEnergy[finishIdx]?laneMotionEnergy[finishIdx].time:finishIdx/sampleFps;
-        // Only add if it's far enough from the last turn
         if(finishTime-lastTurn.time>=minTimeBetweenTurns){
-          dipRegions.push({time:finishTime,index:finishIdx,energy:eSmooth[finishIdx],isFinish:true});
-          console.log('Finish detection: pad touch at '+finishTime.toFixed(2)+'s (energy='+eSmooth[finishIdx].toFixed(1)+' vs baseline='+swimBaseline.toFixed(1)+')');
+          let bestI=0,bestDt=Infinity;
+          for(let i=0;i<rawDisplacements.length;i++){
+            const dt=Math.abs(rawDisplacements[i].time-finishTime);
+            if(dt<bestDt){bestDt=dt;bestI=i}
+          }
+          mergedTurns.push({time:finishTime,posX:bestI<smoothPos.length?smoothPos[bestI]:0.5,index:bestI,isFinish:true,source:'finish'});
+          console.log('Finish: pad touch at '+finishTime.toFixed(2)+'s');
         }
-      } else {
-        console.log('Finish detection: could not find permanent deceleration after last turn at '+lastTurn.time.toFixed(2)+'s');
       }
     }
-  } else if(detectedDips===0){
-    // No dips at all — try to detect the finish as permanent deceleration
+  } else if(detectedWalls===0){
+    // No turns at all — try to detect finish as permanent deceleration
     const searchStartTime=raceStart+minTimeToFirstWall;
     let searchStartIdx=-1;
     for(let i=0;i<laneMotionEnergy.length;i++){
@@ -2851,7 +2982,6 @@ function detectWallTurns(rawDisplacements,sampleFps){
     }
 
     if(searchStartIdx>=0 && expectedWallTouches>=1){
-      // Single-lap race to far wall (e.g., 50 SCY). Only wall = finish.
       const finishDropThresh=swimBaseline*0.60;
       const sustainedFrames=Math.max(Math.floor(sampleFps*2),10);
 
@@ -2876,57 +3006,29 @@ function detectWallTurns(rawDisplacements,sampleFps){
 
       if(finishIdx>=0){
         const finishTime=laneMotionEnergy[finishIdx]?laneMotionEnergy[finishIdx].time:finishIdx/sampleFps;
-        dipRegions.push({time:finishTime,index:finishIdx,energy:eSmooth[finishIdx],isFinish:true});
-        console.log('Finish detection (no-turn race): pad touch at '+finishTime.toFixed(2)+'s');
+        let bestI=0,bestDt=Infinity;
+        for(let i=0;i<rawDisplacements.length;i++){
+          const dt=Math.abs(rawDisplacements[i].time-finishTime);
+          if(dt<bestDt){bestDt=dt;bestI=i}
+        }
+        mergedTurns.push({time:finishTime,posX:bestI<smoothPos.length?smoothPos[bestI]:0.5,index:bestI,isFinish:true,source:'finish'});
+        console.log('Finish (no-turn race): pad touch at '+finishTime.toFixed(2)+'s');
       }
     }
   }
 
-  // === BUILD rawTurns from dipRegions (now possibly including finish) ===
+  // === BUILD rawTurns from merged set ===
+  // Re-sort and deduplicate
+  mergedTurns.sort(function(a,b){return a.time-b.time});
   const rawTurns=[];
   let lastTurnTime=-minTimeBetweenTurns*2;
-  if(dipRegions.length>0){
-    // Sort by time (finish may have been appended out of order)
-    dipRegions.sort(function(a,b){return a.time-b.time});
-    dipRegions.forEach(function(dip){
-      if(dip.time-lastTurnTime<minTimeBetweenTurns) return;
-      // Find nearest position for this dip time
-      let bestI=0,bestDt=Infinity;
-      for(let i=0;i<rawDisplacements.length;i++){
-        const dt=Math.abs(rawDisplacements[i].time-dip.time);
-        if(dt<bestDt){bestDt=dt;bestI=i}
-      }
-      rawTurns.push({
-        time:dip.time,
-        posX:bestI<smoothPos.length?smoothPos[bestI]:0.5,
-        index:bestI,
-        isFinish:!!dip.isFinish
-      });
-      lastTurnTime=dip.time;
-    });
-    console.log('Wall detection total: '+rawTurns.length+' walls ('+rawTurns.filter(function(t){return t.isFinish}).length+' finish)');
+  for(var mt=0;mt<mergedTurns.length;mt++){
+    if(mergedTurns[mt].time-lastTurnTime<minTimeBetweenTurns)continue;
+    rawTurns.push(mergedTurns[mt]);
+    lastTurnTime=mergedTurns[mt].time;
   }
 
-  // If motion dips found nothing (and finish detection didn't either), fall back to position reversals
-  if(rawTurns.length===0){
-    let lastTurnI=-minGap*2;
-    const minDisplacement=camMode==='endon'?0.12:0.05;
-    for(let i=1;i<sVel.length;i++){
-      if(sVel[i]*sVel[i-1]<0 && (i-lastTurnI)>minGap){
-        if(rawDisplacements[i].time-raceStart<minTimeToFirstWall) continue;
-        const rangeStart=Math.max(0,lastTurnI);
-        let displacement=0;
-        for(let j=rangeStart+1;j<=i;j++){
-          displacement+=Math.abs(smoothPos[j]-smoothPos[j-1]);
-        }
-        if(displacement>minDisplacement){
-          rawTurns.push({time:rawDisplacements[i].time,posX:smoothPos[i],index:i});
-          lastTurnI=i;
-        }
-      }
-    }
-    console.log('Wall detection: found '+rawTurns.length+' walls via position reversals (fallback)');
-  }
+  console.log('Wall detection final: '+rawTurns.length+' walls (expected='+expectedWallTouches+', method='+primaryLabel+')');
 
   if(rawTurns.length===0)return [];
 
