@@ -444,12 +444,50 @@ async function loadPoseModel(){
 }
 
 // Run pose detection on a canvas (returns keypoints array or null)
+// Performance tracking for auto-disable
+let poseInferenceCount=0;
+let poseTotalMs=0;
+let poseDisabledSlow=false; // true if auto-disabled due to slow inference
+
 async function detectPose(canvas){
-  if(!poseDetector||!poseModelReady) return null;
+  if(!poseDetector||!poseModelReady||poseDisabledSlow) return null;
   try{
-    const poses=await poseDetector.estimatePoses(canvas);
-    if(poses&&poses.length>0&&poses[0].keypoints){
-      return poses[0].keypoints; // [{x,y,score,name}, ...]
+    const t0=performance.now();
+    // Race against a 500ms timeout — never let inference hang the scan
+    const result=await Promise.race([
+      poseDetector.estimatePoses(canvas),
+      new Promise(function(resolve){setTimeout(function(){resolve('timeout')},500)})
+    ]);
+    const elapsed=performance.now()-t0;
+    poseInferenceCount++;
+    poseTotalMs+=elapsed;
+
+    if(result==='timeout'){
+      console.warn('MoveNet inference timed out ('+elapsed.toFixed(0)+'ms) — skipping frame');
+      // If 3+ timeouts in first 10 inferences, auto-disable
+      if(poseInferenceCount<=10 && elapsed>=490){
+        const avgMs=poseTotalMs/poseInferenceCount;
+        if(avgMs>400){
+          poseDisabledSlow=true;
+          console.warn('MoveNet auto-disabled: avg '+avgMs.toFixed(0)+'ms/frame is too slow for this device');
+        }
+      }
+      return null;
+    }
+
+    // Auto-disable if average inference is too slow after first 5 frames
+    if(poseInferenceCount===5){
+      const avgMs=poseTotalMs/poseInferenceCount;
+      if(avgMs>300){
+        poseDisabledSlow=true;
+        console.warn('MoveNet auto-disabled: avg '+avgMs.toFixed(0)+'ms/frame — falling back to color+motion tracker');
+      } else {
+        console.log('MoveNet perf OK: avg '+avgMs.toFixed(0)+'ms/frame');
+      }
+    }
+
+    if(result&&result.length>0&&result[0].keypoints){
+      return result[0].keypoints;
     }
   }catch(e){
     // Silently fail — fall back to heuristic tracker
@@ -1403,6 +1441,7 @@ async function scanVideo(){
   btn.className='scan-btn scanning';btn.textContent='Loading ML model...';btn.disabled=true;
 
   // Load MoveNet Thunder (async, ~2s first time, cached after)
+  poseInferenceCount=0; poseTotalMs=0; poseDisabledSlow=false; // reset perf tracking
   const usePose=await loadPoseModel();
   if(usePose) console.log('MoveNet Thunder active — fusing pose + color+motion tracking');
   else console.log('MoveNet unavailable — using color+motion tracker only');
