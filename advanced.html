@@ -1266,6 +1266,9 @@ async function scanVideo(){
   cameraShiftX=0;cameraShiftY=0; // reset camera motion compensation
   let cumulativeCamY=0; // cumulative camera Y shift in normalized coords (for continuous compensation)
   liveRopeLeft=null;liveRopeRight=null; // reset live rope detection
+  // Adaptive swimmer tracker state
+  let trackerY=-1; // last known swimmer Y position in pixels
+  let trackerConf=0; // confidence (0-1) of current track
   const progress=document.getElementById('scan-progress');
 
   for(let i=0;i<=totalSamples;i++){
@@ -1502,39 +1505,109 @@ async function scanVideo(){
               cumulativeCamY+=frameCamShiftY/sh;
             }
 
-            // Determine swim direction from previous positions to find leading edge
-            let swimDir=0;
-            if(rawDisplacements.length>=3){
-              const recent=rawDisplacements.slice(-3);
-              const trend=recent[recent.length-1].posX-recent[0].posX;
-              swimDir=trend>0.005?1:(trend<-0.005?-1:0);
-            }
-
-            // Find the leading edge of the active zone
-            let edgeY=-1;
-            if(swimDir>=0){
-              for(let j=numBins-1;j>=0;j--){
-                if(combined[j]>edgeThresh){edgeY=yStart+j*step;break}
-              }
-            } else {
-              for(let j=0;j<numBins;j++){
-                if(combined[j]>edgeThresh){edgeY=yStart+j*step;break}
-              }
-            }
-
-            // Also find the peak of the combined profile
-            let peakY=sh/2;
-            let peakMax=0;
-            for(let j=0;j<numBins;j++){
-              if(combined[j]>peakMax){peakMax=combined[j];peakY=yStart+j*step}
-            }
-
-            // Blend: 70% leading edge + 30% peak
+            // === ADAPTIVE COLOR+MOTION SWIMMER TRACKER ===
+            // Instead of scanning the full trapezoid and finding a leading edge,
+            // track the swimmer with an adaptive window centered on the last known
+            // position. Cap color is the primary signal; motion is secondary.
+            // This is more robust near walls, during glide, and when the trapezoid drifts.
             let swimmerY;
-            if(edgeY>=0){
-              swimmerY=edgeY*0.7+peakY*0.3;
-            } else {
-              swimmerY=peakY;
+            {
+              // Define search window: centered on last position, or full water range if lost
+              const trackWinY=Math.floor(sh*0.20); // ±20% of frame height
+              let searchYmin,searchYmax;
+              if(trackerY>=0 && trackerConf>0.1){
+                searchYmin=Math.max(yStart,Math.floor(trackerY-trackWinY));
+                searchYmax=Math.min(yEnd,Math.floor(trackerY+trackWinY));
+              } else {
+                // Lost or first frame: search full water region
+                searchYmin=yStart;
+                searchYmax=yEnd;
+              }
+
+              // Build score profile along Y axis within lane X bounds
+              const tStep=2;
+              const tBins=Math.max(1,Math.floor((searchYmax-searchYmin)/tStep));
+              const trackScore=new Float32Array(tBins);
+              const hasCapColor=(swimmerColor!==null);
+
+              for(let bi=0;bi<tBins;bi++){
+                const y=searchYmin+bi*tStep;
+                // Get X bounds from lane (trapezoid or fallback)
+                let xLo=0,xHi=sw;
+                if(usePerspective){
+                  const bounds=getLaneBoundsAtY(y/sh);
+                  if(bounds){
+                    xLo=Math.max(0,Math.floor(bounds.xLeft*sw));
+                    xHi=Math.min(sw,Math.floor(bounds.xRight*sw));
+                    // Tighten 10% each side to exclude rope splash
+                    const lw=xHi-xLo;
+                    xLo=Math.floor(xLo+lw*0.10);
+                    xHi=Math.floor(xHi-lw*0.10);
+                  }
+                }
+                let colorScore=0,motionScore=0,pxCount=0;
+                for(let x=xLo;x<xHi;x+=tStep){
+                  const idx=(y*sw+x)*4;
+                  if(idx<0||idx+3>=frameData.length) continue;
+                  pxCount++;
+
+                  // Cap color match (primary signal)
+                  if(hasCapColor){
+                    const hsv=rgbToHsv(frameData[idx],frameData[idx+1],frameData[idx+2]);
+                    let hDiff=Math.abs(hsv.h-swimmerColor.medH);
+                    if(hDiff>180) hDiff=360-hDiff;
+                    if(hDiff<swimmerColor.hRange &&
+                       Math.abs(hsv.s-swimmerColor.medS)<swimmerColor.sRange &&
+                       Math.abs(hsv.v-swimmerColor.medV)<swimmerColor.vRange){
+                      colorScore+=2;
+                    } else if(hDiff<swimmerColor.hRange*1.5){
+                      colorScore+=0.5; // partial match
+                    }
+                  }
+
+                  // Motion (secondary signal)
+                  if(prevFrame){
+                    const diff=Math.abs(frameData[idx]-prevFrame[idx])
+                              +Math.abs(frameData[idx+1]-prevFrame[idx+1])
+                              +Math.abs(frameData[idx+2]-prevFrame[idx+2]);
+                    if(diff>30) motionScore+=Math.min(diff/150,1);
+                  }
+                }
+                if(pxCount>0){
+                  // Normalize by row width so narrow rows aren't penalized
+                  const cNorm=colorScore/pxCount;
+                  const mNorm=motionScore/pxCount;
+                  // Weight: 65% color, 35% motion when cap color available
+                  trackScore[bi]=hasCapColor?(cNorm*0.65+mNorm*0.35):mNorm;
+                }
+              }
+
+              // Find peak score
+              let peakScore=0;
+              for(let bi=0;bi<tBins;bi++){
+                if(trackScore[bi]>peakScore) peakScore=trackScore[bi];
+              }
+
+              // Weighted centroid of bins above 40% of peak — more stable than peak alone
+              const centroidThresh=peakScore*0.40;
+              let totalWeight=0,weightedSum=0;
+              for(let bi=0;bi<tBins;bi++){
+                if(trackScore[bi]>centroidThresh){
+                  const y=searchYmin+bi*tStep;
+                  totalWeight+=trackScore[bi];
+                  weightedSum+=y*trackScore[bi];
+                }
+              }
+
+              if(totalWeight>0 && peakScore>0.01){
+                swimmerY=weightedSum/totalWeight;
+                trackerY=swimmerY;
+                trackerConf=Math.min(1,peakScore*5);
+              } else {
+                // Lost track — hold last known position (decaying confidence)
+                swimmerY=trackerY>=0?trackerY:(yStart+yEnd)/2;
+                trackerConf*=0.8;
+              }
             }
 
             // === APPLY CAMERA COMPENSATION ===
