@@ -683,6 +683,7 @@ function getVideoRenderRect(){
 // Falls back to static rope lines + camera shift compensation when detection fails
 let liveRopeLeft=null, liveRopeRight=null; // current-frame rope X at each scanned Y
 let cameraShiftX=0, cameraShiftY=0; // accumulated shift in normalized coords (0-1)
+let cameraShiftLog=[]; // [{time, sx, sy}] — per-frame camera shift for playback overlay
 // Sampled rope color signatures from initial tap points
 let ropeColorLeft=null, ropeColorRight=null; // {colors:[{r,g,b},...], waterColor:{r,g,b}}
 let lastSampleFps=30; // stored from most recent scan for use outside scan function
@@ -1093,6 +1094,19 @@ function clearLane(){
   document.getElementById('lane-btn').textContent=camMode==='endon'?'👆 Tap Lane Ropes':'👆 Tap Swimmer on Video';
   drawLaneOverlay();
 }
+// Get interpolated camera shift at a given video time
+function getCameraShiftAtTime(t){
+  if(!cameraShiftLog||cameraShiftLog.length===0) return{sx:0,sy:0};
+  if(t<=cameraShiftLog[0].time) return{sx:cameraShiftLog[0].sx,sy:cameraShiftLog[0].sy};
+  if(t>=cameraShiftLog[cameraShiftLog.length-1].time) return{sx:cameraShiftLog[cameraShiftLog.length-1].sx,sy:cameraShiftLog[cameraShiftLog.length-1].sy};
+  // Binary search for bracketing entries
+  let lo=0,hi=cameraShiftLog.length-1;
+  while(lo<hi-1){const mid=(lo+hi)>>1;if(cameraShiftLog[mid].time<=t)lo=mid;else hi=mid;}
+  const a=cameraShiftLog[lo],b=cameraShiftLog[hi];
+  const frac=(t-a.time)/(b.time-a.time||1);
+  return{sx:a.sx+frac*(b.sx-a.sx),sy:a.sy+frac*(b.sy-a.sy)};
+}
+
 function drawLaneOverlay(){
   const lo=document.getElementById('lane-overlay');
   const rect=V.getBoundingClientRect();
@@ -1157,37 +1171,63 @@ function drawLaneOverlay(){
   }
 
   if(ropeLeft&&ropeRight){
-    // Highlight lane ropes as glowing lines extending along the full rope length
-    // Use the actual rope endpoints (tapped by user), not just water bounds
-    const lx1=vr.x+ropeLeft.x1*vr.w, ly1=vr.y+ropeLeft.y1*vr.h;
-    const lx2=vr.x+ropeLeft.x2*vr.w, ly2=vr.y+ropeLeft.y2*vr.h;
-    const rx1=vr.x+ropeRight.x1*vr.w, ry1=vr.y+ropeRight.y1*vr.h;
-    const rx2=vr.x+ropeRight.x2*vr.w, ry2=vr.y+ropeRight.y2*vr.h;
+    // Highlight lane ropes — extend lines to full frame height, clipped to video
+    // Apply camera shift at the current video time so lines track with pan/zoom
+    const curTime=V?V.currentTime:0;
+    const camShift=getCameraShiftAtTime(curTime);
 
-    // Extend lines 30% beyond tapped points in each direction
-    const ext=0.3;
-    function extendLine(ax,ay,bx,by){
-      const dx=bx-ax, dy=by-ay;
-      return{x1:ax-dx*ext, y1:ay-dy*ext, x2:bx+dx*ext, y2:by+dy*ext};
+    // Offset rope positions by camera shift (ropes are in original tap coords,
+    // camera has shifted since then)
+    const oLx1=ropeLeft.x1+camShift.sx, oLy1=ropeLeft.y1+camShift.sy;
+    const oLx2=ropeLeft.x2+camShift.sx, oLy2=ropeLeft.y2+camShift.sy;
+    const oRx1=ropeRight.x1+camShift.sx, oRy1=ropeRight.y1+camShift.sy;
+    const oRx2=ropeRight.x2+camShift.sx, oRy2=ropeRight.y2+camShift.sy;
+
+    // Extrapolate each rope line to y=0 (top of frame) and y=1 (bottom of frame)
+    function ropeLineAtY(x1,y1,x2,y2,yNorm){
+      const dy=y2-y1;
+      if(Math.abs(dy)<0.001) return (x1+x2)/2;
+      return x1+(x2-x1)*(yNorm-y1)/dy;
     }
-    const lExt=extendLine(lx1,ly1,lx2,ly2);
-    const rExt=extendLine(rx1,ry1,rx2,ry2);
+    const yTop=0, yBot=1;
+    const lxTop=ropeLineAtY(oLx1,oLy1,oLx2,oLy2,yTop);
+    const lxBot=ropeLineAtY(oLx1,oLy1,oLx2,oLy2,yBot);
+    const rxTop=ropeLineAtY(oRx1,oRy1,oRx2,oRy2,yTop);
+    const rxBot=ropeLineAtY(oRx1,oRy1,oRx2,oRy2,yBot);
 
     // Clip to video area
     lx.save();
     lx.beginPath();lx.rect(vr.x,vr.y,vr.w,vr.h);lx.clip();
 
-    // Left rope: cyan glow
-    lx.strokeStyle='rgba(0,229,255,0.25)';lx.lineWidth=6;lx.lineCap='round';
-    lx.beginPath();lx.moveTo(lExt.x1,lExt.y1);lx.lineTo(lExt.x2,lExt.y2);lx.stroke();
-    lx.strokeStyle='rgba(0,229,255,0.7)';lx.lineWidth=2;
-    lx.beginPath();lx.moveTo(lExt.x1,lExt.y1);lx.lineTo(lExt.x2,lExt.y2);lx.stroke();
+    // Gradient: more visible near camera (bottom), subtler at far end (top)
+    var lg=lx.createLinearGradient(0,vr.y,0,vr.y+vr.h);
+    lg.addColorStop(0,'rgba(0,229,255,0.12)');
+    lg.addColorStop(0.5,'rgba(0,229,255,0.30)');
+    lg.addColorStop(1,'rgba(0,229,255,0.45)');
 
-    // Right rope: cyan glow
-    lx.strokeStyle='rgba(0,229,255,0.25)';lx.lineWidth=6;
-    lx.beginPath();lx.moveTo(rExt.x1,rExt.y1);lx.lineTo(rExt.x2,rExt.y2);lx.stroke();
-    lx.strokeStyle='rgba(0,229,255,0.7)';lx.lineWidth=2;
-    lx.beginPath();lx.moveTo(rExt.x1,rExt.y1);lx.lineTo(rExt.x2,rExt.y2);lx.stroke();
+    // Left rope: glow + core
+    lx.strokeStyle=lg;lx.lineWidth=8;lx.lineCap='round';
+    lx.beginPath();
+    lx.moveTo(vr.x+lxTop*vr.w,vr.y+yTop*vr.h);
+    lx.lineTo(vr.x+lxBot*vr.w,vr.y+yBot*vr.h);
+    lx.stroke();
+    lx.strokeStyle='rgba(0,229,255,0.85)';lx.lineWidth=1.5;
+    lx.beginPath();
+    lx.moveTo(vr.x+lxTop*vr.w,vr.y+yTop*vr.h);
+    lx.lineTo(vr.x+lxBot*vr.w,vr.y+yBot*vr.h);
+    lx.stroke();
+
+    // Right rope: glow + core
+    lx.strokeStyle=lg;lx.lineWidth=8;
+    lx.beginPath();
+    lx.moveTo(vr.x+rxTop*vr.w,vr.y+yTop*vr.h);
+    lx.lineTo(vr.x+rxBot*vr.w,vr.y+yBot*vr.h);
+    lx.stroke();
+    lx.strokeStyle='rgba(0,229,255,0.85)';lx.lineWidth=1.5;
+    lx.beginPath();
+    lx.moveTo(vr.x+rxTop*vr.w,vr.y+yTop*vr.h);
+    lx.lineTo(vr.x+rxBot*vr.w,vr.y+yBot*vr.h);
+    lx.stroke();
 
     lx.restore();
     {
@@ -1478,7 +1518,7 @@ async function scanVideo(){
   let prevFrame=null,prevCenter=null,prevTopData=null,prevStrips=null;
   const rawDisplacements=[],rawMotion=[];
   laneMotionEnergy=[]; // per-frame total motion energy within lane bounds (for wall detection)
-  cameraShiftX=0;cameraShiftY=0; // reset camera motion compensation
+  cameraShiftX=0;cameraShiftY=0;cameraShiftLog=[]; // reset camera motion compensation
   let cumulativeCamY=0; // cumulative camera Y shift in normalized coords (for continuous compensation)
   liveRopeLeft=null;liveRopeRight=null; // reset live rope detection
   // Adaptive swimmer tracker state
@@ -1999,6 +2039,8 @@ async function scanVideo(){
     }
 
     prevCenter=new Uint8ClampedArray(centerData);
+    // Log camera shift per frame for playback rope overlay
+    cameraShiftLog.push({time:t,sx:cameraShiftX,sy:cameraShiftY});
     progress.style.width=(i/totalSamples*100)+'%';
     document.getElementById('scan-st').textContent=Math.round(i/totalSamples*100)+'%';
     if(i%5===0)await new Promise(r=>setTimeout(r,0));
@@ -2751,7 +2793,7 @@ function resetVideo(){
   V.pause();V.removeAttribute('src');V.load();
 
   // Clear all data
-  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];cameraShiftX=0;cameraShiftY=0;liveRopeLeft=null;liveRopeRight=null;
+  flowData=[];motionData=[];dStrokes=[];cStroke=[];laneMotionEnergy=[];cameraShiftX=0;cameraShiftY=0;cameraShiftLog=[];liveRopeLeft=null;liveRopeRight=null;
   scanning=false;scanned=false;videoReady=false;playing=false;
   detectedStroke='unknown';
   beepTime=-1;blockDepartTime=-1;wallTouches=[];
