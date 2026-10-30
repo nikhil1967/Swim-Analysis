@@ -1436,7 +1436,9 @@ async function scanVideo(){
               // Accumulate shift in normalized coords
               cameraShiftY+=bestShift/sh;
               cameraShiftX+=bestShiftX/sw;
-              cumulativeCamY+=bestShift/sh; // also feed cumulative tracker
+              // Note: do NOT add to cumulativeCamY here — zoom frames already hold position
+              // and waterYmin/waterYmax shift to track the pool's motion region.
+              // cumulativeCamY only tracks the subtle non-zoom camera drift.
               // Also adjust waterYmin/waterYmax to track the shifting pool
               waterYmin+=bestShift/sh;
               waterYmax+=bestShift/sh;
