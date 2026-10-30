@@ -458,8 +458,9 @@ async function detectPose(canvas){
 }
 
 // Extract swimmer Y position from keypoints (end-on camera: Y = distance from camera)
+// laneBoundsFunc: optional function(yNorm) returning {xLeft,xRight} in normalized coords
 // Returns {y: normalized 0-1, confidence: 0-1, wristY: pixel y of leading wrist, method: string} or null
-function getSwimmerYFromKeypoints(keypoints,canvasW,canvasH,waterYmin,waterYmax){
+function getSwimmerYFromKeypoints(keypoints,canvasW,canvasH,waterYmin,waterYmax,laneBoundsFunc){
   if(!keypoints) return null;
 
   // Relevant keypoints for swimmer tracking
@@ -470,6 +471,33 @@ function getSwimmerYFromKeypoints(keypoints,canvasW,canvasH,waterYmin,waterYmax)
   const rAnkle=keypoints[KP.RIGHT_ANKLE];
   const lShoulder=keypoints[KP.LEFT_SHOULDER];
   const rShoulder=keypoints[KP.RIGHT_SHOULDER];
+
+  // === LANE VALIDATION ===
+  // If lane bounds are available, check whether the detected body is in the correct lane.
+  // Use the most confident keypoints (nose, shoulders) to determine X position.
+  // If the body centroid X is outside the lane, this is the WRONG swimmer — reject.
+  if(laneBoundsFunc){
+    const checkParts=[];
+    if(nose.score>0.2) checkParts.push({x:nose.x/canvasW,y:nose.y/canvasH});
+    if(lShoulder.score>0.2) checkParts.push({x:lShoulder.x/canvasW,y:lShoulder.y/canvasH});
+    if(rShoulder.score>0.2) checkParts.push({x:rShoulder.x/canvasW,y:rShoulder.y/canvasH});
+
+    if(checkParts.length>0){
+      // Average X position of visible upper body
+      const avgX=checkParts.reduce(function(s,p){return s+p.x},0)/checkParts.length;
+      const avgY=checkParts.reduce(function(s,p){return s+p.y},0)/checkParts.length;
+      const bounds=laneBoundsFunc(avgY);
+      if(bounds){
+        // Allow 20% margin outside lane bounds (swimmer may lean, arms extend)
+        const laneW=bounds.xRight-bounds.xLeft;
+        const margin=laneW*0.20;
+        if(avgX<bounds.xLeft-margin || avgX>bounds.xRight+margin){
+          // Detected body is outside the selected lane — wrong swimmer
+          return null;
+        }
+      }
+    }
+  }
 
   // Confidence threshold for a keypoint to be usable
   const minConf=0.15;
@@ -1435,7 +1463,9 @@ async function scanVideo(){
         const hasPerspective=(camMode==='endon'&&ropeLeft&&ropeRight);
         const yS=hasPerspective?Math.max(0,Math.floor(waterYmin*sh)):0;
         const yE=hasPerspective?Math.min(sh,Math.floor(waterYmax*sh)):sh;
-        poseResult=getSwimmerYFromKeypoints(scaledKps,sw,sh,yS,yE);
+        // Pass lane bounds checker so MoveNet rejects swimmers in wrong lanes
+        const lbFunc=hasPerspective?getLaneBoundsAtY:null;
+        poseResult=getSwimmerYFromKeypoints(scaledKps,sw,sh,yS,yE,lbFunc);
       }
     }
 
