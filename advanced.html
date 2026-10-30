@@ -1234,7 +1234,7 @@ async function scanVideo(){
   btn.className='scan-btn scanning';btn.textContent='Scanning...';btn.disabled=true;
   V.pause();
 
-  const sampleFps=30;
+  const sampleFps=20; // 20fps: sub-frame interpolation still gives ~±8ms precision
   lastSampleFps=sampleFps; // store globally for functions called after scan
   const totalSamples=Math.floor(V.duration*sampleFps);
   const sw=320,sh=180;
@@ -1269,6 +1269,7 @@ async function scanVideo(){
   // Adaptive swimmer tracker state
   let trackerY=-1; // last known swimmer Y position in pixels
   let trackerConf=0; // confidence (0-1) of current track
+  let trackerLostFrames=0; // consecutive frames with low confidence
   const progress=document.getElementById('scan-progress');
 
   for(let i=0;i<=totalSamples;i++){
@@ -1513,13 +1514,15 @@ async function scanVideo(){
             let swimmerY;
             {
               // Define search window: centered on last position, or full water range if lost
+              // After 4+ lost frames (e.g. underwater after turn), expand to full region
+              // so we can reacquire when swimmer surfaces far from last position
               const trackWinY=Math.floor(sh*0.20); // ±20% of frame height
               let searchYmin,searchYmax;
-              if(trackerY>=0 && trackerConf>0.1){
+              if(trackerY>=0 && trackerConf>0.1 && trackerLostFrames<4){
                 searchYmin=Math.max(yStart,Math.floor(trackerY-trackWinY));
                 searchYmax=Math.min(yEnd,Math.floor(trackerY+trackWinY));
               } else {
-                // Lost or first frame: search full water region
+                // Lost, first frame, or lost for 4+ frames: search full water region
                 searchYmin=yStart;
                 searchYmax=yEnd;
               }
@@ -1603,10 +1606,12 @@ async function scanVideo(){
                 swimmerY=weightedSum/totalWeight;
                 trackerY=swimmerY;
                 trackerConf=Math.min(1,peakScore*5);
+                trackerLostFrames=0;
               } else {
                 // Lost track — hold last known position (decaying confidence)
                 swimmerY=trackerY>=0?trackerY:(yStart+yEnd)/2;
                 trackerConf*=0.8;
+                trackerLostFrames++;
               }
             }
 
@@ -1620,11 +1625,11 @@ async function scanVideo(){
             const waterBot=waterYmax*sh;
             const waterRange=Math.max(waterBot-waterTop,1);
             // Temporal smoothing: EMA with α=0.35 (tighter than before for 30fps)
-            const emaAlpha=0.35;
+            const emaAlpha=0.40; // slightly higher for 20fps (was 0.35 at 30fps, 0.5 at 15fps)
             const prevPosY=rawDisplacements.length>0?rawDisplacements[rawDisplacements.length-1].posX*waterRange:-1;
             if(prevPosY>=0){
               // Limit max jump per frame to 6% of water range (tighter at 30fps)
-              const maxJump=waterRange*0.06;
+              const maxJump=waterRange*0.08; // slightly wider for 20fps (was 0.06 at 30fps, 0.10 at 15fps)
               const delta=swimmerY-waterTop-prevPosY;
               if(Math.abs(delta)>maxJump){
                 swimmerY=waterTop+prevPosY+Math.sign(delta)*maxJump;
