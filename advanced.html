@@ -1273,7 +1273,7 @@ async function scanVideo(){
     V.currentTime=t;
     await new Promise(function(resolve){
       const onS=function(){V.removeEventListener('seeked',onS);resolve()};
-      V.addEventListener('seeked',onS);setTimeout(resolve,200);
+      V.addEventListener('seeked',onS);setTimeout(resolve,100);
     });
 
     sx.drawImage(V,0,0,sw,sh);
@@ -1455,13 +1455,16 @@ async function scanVideo(){
             // === CONTINUOUS CAMERA Y-SHIFT ESTIMATION ===
             // Even on non-zoom frames, the camera pans slowly to follow the swimmer.
             // Use lightweight 1D column correlation to measure frame-to-frame Y shift.
+            // Run every 2nd frame (15Hz) — camera drift is slow, saves ~40% scan time.
             let frameCamShiftY=0;
-            if(prevFrame){
+            if(prevFrame && i%2===0){
               // Sample a narrow column near the rope (more stable than lane center)
               const colX=usePerspective && liveRopeLeft ? Math.max(0,Math.floor(liveRopeLeft.x1*sw)-5) : Math.floor(sw*0.3);
               const colW=Math.max(2,Math.floor(sw*0.03));
               const maxShiftPx=Math.floor(sh*0.04); // search ±4% of frame height
               let bestDy=0,bestSAD=Infinity;
+              // Cache SAD values for sub-pixel refinement (avoid recomputation)
+              const sadCache=new Float32Array(2*maxShiftPx+1);
               for(let dy=-maxShiftPx;dy<=maxShiftPx;dy++){
                 let sad=0,cnt=0;
                 for(let y=Math.max(0,-dy);y<Math.min(sh,sh-dy);y+=4){
@@ -1476,29 +1479,15 @@ async function scanVideo(){
                     }
                   }
                 }
-                if(cnt>0){sad/=cnt;if(sad<bestSAD){bestSAD=sad;bestDy=dy}}
+                const val=cnt>0?sad/cnt:Infinity;
+                sadCache[dy+maxShiftPx]=val;
+                if(val<bestSAD){bestSAD=val;bestDy=dy}
               }
-              // Sub-pixel refinement: parabolic fit on SAD values around best
+              // Sub-pixel refinement: parabolic fit using cached SAD values
               if(Math.abs(bestDy)<maxShiftPx){
-                const getSAD=function(dy){
-                  let sad=0,cnt=0;
-                  for(let y=Math.max(0,-dy);y<Math.min(sh,sh-dy);y+=4){
-                    for(let x=colX;x<Math.min(colX+colW,sw);x+=2){
-                      const i1=(y*sw+x)*4;
-                      const i2=((y+dy)*sw+x)*4;
-                      if(i1>=0&&i2>=0&&i1<frameData.length-3&&i2<prevFrame.length-3){
-                        sad+=Math.abs(frameData[i1]-prevFrame[i2])
-                            +Math.abs(frameData[i1+1]-prevFrame[i2+1])
-                            +Math.abs(frameData[i1+2]-prevFrame[i2+2]);
-                        cnt++;
-                      }
-                    }
-                  }
-                  return cnt>0?sad/cnt:Infinity;
-                };
                 const sM=bestSAD;
-                const sL=getSAD(bestDy-1);
-                const sR=getSAD(bestDy+1);
+                const sL=sadCache[bestDy-1+maxShiftPx];
+                const sR=sadCache[bestDy+1+maxShiftPx];
                 const denom=2*(sL+sR-2*sM);
                 if(Math.abs(denom)>1e-6){
                   frameCamShiftY=bestDy+(sL-sR)/denom;
@@ -1665,7 +1654,7 @@ async function scanVideo(){
     prevCenter=new Uint8ClampedArray(centerData);
     progress.style.width=(i/totalSamples*100)+'%';
     document.getElementById('scan-st').textContent=Math.round(i/totalSamples*100)+'%';
-    if(i%3===0)await new Promise(r=>setTimeout(r,0));
+    if(i%5===0)await new Promise(r=>setTimeout(r,0));
   }
 
   // ===== CALIBRATE SPEED =====
