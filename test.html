@@ -495,16 +495,11 @@ function drawOverlay(){
     return;
   }
 
-  // Draw rope highlight lines (full length, camera-shift compensated)
+  // Draw rope highlight lines (between tap points only, no extrapolation)
   if(ropeLeft&&ropeRight){
-    function ropeXatY(rope,yNorm){
-      const dy=rope.y2-rope.y1;
-      if(Math.abs(dy)<0.001) return(rope.x1+rope.x2)/2;
-      return rope.x1+(rope.x2-rope.x1)*(yNorm-rope.y1)/dy;
-    }
-    // Extend to full frame
-    const lxT=ropeXatY(ropeLeft,0),lxB=ropeXatY(ropeLeft,1);
-    const rxT=ropeXatY(ropeRight,0),rxB=ropeXatY(ropeRight,1);
+    // Use actual tap endpoints — no extrapolation prevents the X-crossing artifact
+    const lxT=ropeLeft.x1,lyT=ropeLeft.y1,lxB=ropeLeft.x2,lyB=ropeLeft.y2;
+    const rxT=ropeRight.x1,ryT=ropeRight.y1,rxB=ropeRight.x2,ryB=ropeRight.y2;
 
     ctx.save();
     ctx.beginPath();ctx.rect(vr.x,vr.y,vr.w,vr.h);ctx.clip();
@@ -514,17 +509,17 @@ function drawOverlay(){
     lg.addColorStop(0,'rgba(0,229,255,0.10)');
     lg.addColorStop(1,'rgba(0,229,255,0.40)');
 
-    // Left rope
+    // Left rope (between actual tap points)
     ctx.strokeStyle=lg;ctx.lineWidth=6;ctx.lineCap='round';
-    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y);ctx.lineTo(vr.x+lxB*vr.w,vr.y+vr.h);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y+lyT*vr.h);ctx.lineTo(vr.x+lxB*vr.w,vr.y+lyB*vr.h);ctx.stroke();
     ctx.strokeStyle='rgba(0,229,255,0.8)';ctx.lineWidth=1.5;
-    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y);ctx.lineTo(vr.x+lxB*vr.w,vr.y+vr.h);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y+lyT*vr.h);ctx.lineTo(vr.x+lxB*vr.w,vr.y+lyB*vr.h);ctx.stroke();
 
-    // Right rope
+    // Right rope (between actual tap points)
     ctx.strokeStyle=lg;ctx.lineWidth=6;
-    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y);ctx.lineTo(vr.x+rxB*vr.w,vr.y+vr.h);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y+ryT*vr.h);ctx.lineTo(vr.x+rxB*vr.w,vr.y+ryB*vr.h);ctx.stroke();
     ctx.strokeStyle='rgba(0,229,255,0.8)';ctx.lineWidth=1.5;
-    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y);ctx.lineTo(vr.x+rxB*vr.w,vr.y+vr.h);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y+ryT*vr.h);ctx.lineTo(vr.x+rxB*vr.w,vr.y+ryB*vr.h);ctx.stroke();
 
     ctx.restore();
   }
