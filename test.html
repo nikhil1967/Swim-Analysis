@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Swim Analysis — Test</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0c;color:#b0c0d0;font-family:'IBM Plex Mono','Menlo',monospace;min-height:100vh}
+.wrap{max-width:1000px;margin:0 auto;padding:12px 12px 80px}
+button{font-family:inherit;cursor:pointer;touch-action:manipulation}
+input[type=number]{font-family:inherit;-webkit-appearance:none;-moz-appearance:textfield}
+
+h1{font-size:16px;color:#00e5ff;letter-spacing:2px;margin-bottom:8px;font-weight:800}
+.subtitle{font-size:10px;color:#5a7a8a;margin-bottom:16px;letter-spacing:1px}
+
+/* Setup */
+.setup{background:rgba(0,229,255,.03);border-radius:12px;padding:14px;border:1px solid rgba(0,229,255,.08);margin-bottom:10px}
+.setup-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.setup-row+.setup-row{margin-top:8px}
+.lbl{font-size:10px;color:#00e5ff;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;min-width:65px}
+.inp{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 10px;color:#e0e8f0;font-family:inherit;font-size:14px;font-weight:700;width:65px;text-align:center;outline:none}
+.inp:focus{border-color:#00e5ff}
+select.inp{-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.06) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a7a8a'/%3E%3C/svg%3E") no-repeat right 8px center;padding-right:22px;cursor:pointer}
+.unit{font-size:11px;color:#5a7a8a}
+.toggle{display:flex;gap:2px;background:rgba(255,255,255,.03);border-radius:6px;padding:2px}
+.toggle button{padding:5px 10px;border:none;border-radius:4px;font-size:10px;font-weight:700;color:#5a7a8a;background:transparent}
+.toggle button.on{background:rgba(0,229,255,.15);color:#00e5ff}
+
+/* Video */
+.vid-wrap{position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#000;touch-action:none;margin-bottom:2px}
+.vid-wrap video{width:100%;display:block;max-height:480px;object-fit:contain;background:#000}
+#overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1}
+.vid-wrap.tapping #overlay{pointer-events:auto;cursor:crosshair;z-index:10}
+
+/* Controls */
+.controls{display:flex;gap:4px;align-items:center;padding:6px 0;flex-wrap:wrap}
+.btn{padding:6px 12px;border:1px solid rgba(0,229,255,.2);border-radius:6px;background:rgba(0,229,255,.05);color:#00e5ff;font-size:11px;font-weight:700;letter-spacing:0.5px}
+.btn:hover{background:rgba(0,229,255,.12)}
+.btn-primary{background:rgba(0,229,255,.15);border-color:rgba(0,229,255,.4)}
+.btn-scan{background:rgba(255,183,77,.15);border-color:rgba(255,183,77,.4);color:#ffb74d}
+.btn-scan:hover{background:rgba(255,183,77,.25)}
+#time-display{font-size:18px;font-weight:800;color:#00e5ff;font-variant-numeric:tabular-nums;margin-right:8px}
+.fr{font-size:11px;color:#5a7a8a}.fr b{color:#ffd740}
+.spacer{flex:1}
+
+/* Status */
+.status{font-size:11px;padding:6px 12px;border-radius:6px;margin:4px 0}
+.status-info{background:rgba(0,229,255,.06);color:#76c8d0;border:1px solid rgba(0,229,255,.1)}
+.status-warn{background:rgba(255,183,77,.06);color:#ffb74d;border:1px solid rgba(255,183,77,.1)}
+.status-ok{background:rgba(118,255,3,.06);color:#76ff03;border:1px solid rgba(118,255,3,.1)}
+.status-err{background:rgba(255,82,82,.06);color:#ff5252;border:1px solid rgba(255,82,82,.1)}
+
+/* Progress */
+.progress-bar{height:3px;background:rgba(255,255,255,.05);border-radius:2px;overflow:hidden;margin:4px 0}
+.progress-bar .fill{height:100%;background:linear-gradient(90deg,#00e5ff,#76ff03);width:0%;transition:width 0.3s}
+
+/* Results */
+.results{margin-top:12px}
+.split-table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0}
+.split-table th{text-align:left;color:#00e5ff;font-size:10px;letter-spacing:1px;padding:6px 8px;border-bottom:1px solid rgba(0,229,255,.15)}
+.split-table td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.04)}
+.split-table .time{color:#76ff03;font-weight:700;font-variant-numeric:tabular-nums}
+.split-table .split{color:#ffd740;font-weight:600}
+
+/* Rope strip debug */
+.rope-debug{display:flex;gap:8px;margin:8px 0;font-size:10px}
+.rope-strip{height:20px;border:1px solid rgba(255,255,255,.1);border-radius:4px;flex:1}
+
+/* Upload */
+#upload-zone{display:flex;flex-direction:column;align-items:center;justify-content:center;height:280px;border-radius:12px;cursor:pointer;border:1px dashed rgba(0,229,255,.2);background:rgba(0,229,255,.015)}
+#upload-zone:hover{border-color:rgba(0,229,255,.4);background:rgba(0,229,255,.03)}
+.upload-icon{font-size:48px;margin-bottom:8px;opacity:0.5}
+.upload-text{color:#5a7a8a;font-size:12px}
+#player-area{display:none}
+
+/* Graph */
+.graph-wrap{position:relative;height:140px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:8px;margin:8px 0;overflow:hidden}
+.graph-wrap canvas{width:100%;height:100%}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SWIM ANALYSIS — TEST</h1>
+  <div class="subtitle">ROPE-MARKING WALL DETECTION · BEEP · SPLITS · FRAME-BY-FRAME</div>
+
+  <!-- UPLOAD -->
+  <div id="upload-zone" onclick="document.getElementById('file-input').click()">
+    <div class="upload-icon">🎬</div>
+    <div class="upload-text">Tap to load swim video</div>
+    <div class="upload-text" style="margin-top:4px;font-size:10px;color:#3a5a6a">iPhone .mov / .mp4</div>
+    <input type="file" id="file-input" accept="video/*" style="display:none" onchange="loadVideo(this)">
+  </div>
+
+  <!-- PLAYER AREA -->
+  <div id="player-area">
+
+    <!-- SETUP -->
+    <div class="setup">
+      <div class="setup-row">
+        <span class="lbl">Course</span>
+        <div class="toggle" id="course-toggle">
+          <button class="on" onclick="setCourse('SCY')">SCY 25yd</button>
+          <button onclick="setCourse('LCM')">LCM 50m</button>
+          <button onclick="setCourse('SCM')">SCM 25m</button>
+        </div>
+        <span class="unit" id="lap-info">25 yd/lap</span>
+      </div>
+      <div class="setup-row">
+        <span class="lbl">Event</span>
+        <select class="inp" id="event-dist" onchange="updateEvent()" style="width:75px">
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="200">200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+          <option value="1650">1650</option>
+        </select>
+        <select class="inp" id="event-stroke" style="width:80px">
+          <option value="free">Free</option>
+          <option value="back">Back</option>
+          <option value="breast">Breast</option>
+          <option value="fly">Fly</option>
+          <option value="IM">IM</option>
+        </select>
+        <span class="unit" id="event-info">100 Free · 4 laps · 100 yd</span>
+      </div>
+      <div class="setup-row">
+        <span class="lbl">Official</span>
+        <input type="text" class="inp" id="official-time" placeholder="ss.cc" style="width:90px">
+        <span class="unit" style="color:#3a5a6a">← optional official time</span>
+      </div>
+    </div>
+
+    <!-- VIDEO -->
+    <div class="vid-wrap" id="vid-wrap">
+      <video id="V" playsinline preload="auto"></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <!-- TIME + TRANSPORT -->
+    <div class="controls">
+      <span id="time-display">0:00.00</span>
+      <span class="fr">F<b id="frame-num">0</b></span>
+      <div class="spacer"></div>
+      <button class="btn" onclick="stepFrame(-10)">⏪10</button>
+      <button class="btn" onclick="stepFrame(-1)">◀1</button>
+      <button class="btn btn-primary" id="play-btn" onclick="togglePlay()">▶ PLAY</button>
+      <button class="btn" onclick="stepFrame(1)">1▶</button>
+      <button class="btn" onclick="stepFrame(10)">10⏩</button>
+      <span class="unit" style="margin-left:8px" id="speed-label">1.00x</span>
+      <button class="btn" onclick="changeSpeed(-1)">−</button>
+      <button class="btn" onclick="changeSpeed(1)">+</button>
+    </div>
+
+    <!-- LANE SELECTION -->
+    <div class="controls">
+      <button class="btn btn-primary" id="lane-btn" onclick="startLaneTap()">👆 Tap Lane Ropes</button>
+      <span class="unit" id="lane-status">Tap 4 points: near+far on left rope, then near+far on right rope</span>
+    </div>
+
+    <!-- SCAN -->
+    <div class="controls">
+      <button class="btn btn-scan" id="scan-btn" onclick="startScan()">⚡ SCAN</button>
+      <button class="btn" id="beep-btn" onclick="setBeepManual()">🔔 SET BEEP</button>
+      <span class="unit" id="scan-status"></span>
+    </div>
+    <div class="progress-bar"><div class="fill" id="progress"></div></div>
+
+    <!-- STATUS -->
+    <div id="status-area"></div>
+
+    <!-- ROPE DEBUG STRIPS -->
+    <div class="rope-debug" id="rope-debug" style="display:none">
+      <span class="unit">L:</span><canvas class="rope-strip" id="rope-strip-left"></canvas>
+      <span class="unit">R:</span><canvas class="rope-strip" id="rope-strip-right"></canvas>
+    </div>
+
+    <!-- RESULTS -->
+    <div class="results" id="results" style="display:none">
+      <div class="graph-wrap"><canvas id="graph"></canvas></div>
+      <table class="split-table" id="split-table"></table>
+    </div>
+  </div>
+</div>
+
+<canvas id="scan-canvas" style="display:none"></canvas>
+
+<script>
+// ===== GLOBALS =====
+let V=null, videoFileRef=null, videoReady=false;
+let playing=false, playSpeed=1.0;
+const SPEEDS=[0.10,0.25,0.50,0.75,1.0,1.25,1.5,2.0];
+let speedIdx=4; // 1.0x
+
+// Course config
+const COURSES={SCY:{len:25,unit:'yd'},LCM:{len:50,unit:'m'},SCM:{len:25,unit:'m'}};
+let course='SCY';
+function getLapLen(){return COURSES[course].len}
+function getLapUnit(){return COURSES[course].unit}
+function getNumLaps(){return Math.max(1,Math.round(parseInt(document.getElementById('event-dist').value)/getLapLen()))}
+function getTotalDist(){return getNumLaps()*getLapLen()}
+
+// Lane rope data (normalized 0-1 coords)
+let ropeTaps=[];   // [{x,y}, ...] — 4 tap points
+let ropeLeft=null;  // {x1,y1,x2,y2} — left rope endpoints (y1=top/far, y2=bottom/near)
+let ropeRight=null; // {x1,y1,x2,y2} — right rope endpoints
+let selectingLane=false;
+
+// Scan results
+let beepTime=-1;
+let blockDepartTime=-1;
+let wallTouches=[];  // [{time, method, confidence}]
+let ropeColorLog=[]; // [{time, leftColors:[], rightColors:[]}] — per-frame rope color sampling
+let scanning=false;
+let scanned=false;
+
+// ===== VIDEO LOADING =====
+function loadVideo(input){
+  const file=input.files[0];
+  if(!file)return;
+  videoFileRef=file;
+  V=document.getElementById('V');
+  V.src=URL.createObjectURL(file);
+  V.load();
+  V.addEventListener('loadedmetadata',function(){
+    videoReady=true;
+    document.getElementById('upload-zone').style.display='none';
+    document.getElementById('player-area').style.display='block';
+    updateTime();
+    updateEvent();
+    showStatus('Video loaded: '+V.duration.toFixed(1)+'s, '+V.videoWidth+'×'+V.videoHeight+' @ '+Math.round(getVideoFps())+'fps','info');
+  },{once:true});
+}
+
+function getVideoFps(){
+  // Approximate — most phone videos are 30fps
+  return 30;
+}
+
+// ===== PLAYBACK =====
+function togglePlay(){
+  if(!V)return;
+  if(V.paused){
+    V.playbackRate=playSpeed;
+    V.play();
+    playing=true;
+    document.getElementById('play-btn').textContent='⏸ PAUSE';
+  } else {
+    V.pause();
+    playing=false;
+    document.getElementById('play-btn').textContent='▶ PLAY';
+  }
+}
+
+function stepFrame(n){
+  if(!V||!V.paused) return;
+  // Each frame at 30fps = ~33.33ms
+  const fps=getVideoFps();
+  V.currentTime=Math.max(0,Math.min(V.duration,V.currentTime+n/fps));
+  updateTime();
+  drawOverlay();
+}
+
+function changeSpeed(dir){
+  speedIdx=Math.max(0,Math.min(SPEEDS.length-1,speedIdx+dir));
+  playSpeed=SPEEDS[speedIdx];
+  document.getElementById('speed-label').textContent=playSpeed.toFixed(2)+'x';
+  if(V&&!V.paused) V.playbackRate=playSpeed;
+}
+
+function updateTime(){
+  if(!V)return;
+  const t=V.currentTime;
+  const m=Math.floor(t/60);
+  const s=t-m*60;
+  document.getElementById('time-display').textContent=m+':'+s.toFixed(2).padStart(5,'0');
+  document.getElementById('frame-num').textContent=Math.round(t*getVideoFps());
+}
+
+// Continuous update during playback
+function onTimeUpdate(){
+  updateTime();
+  drawOverlay();
+}
+
+// ===== COURSE / EVENT =====
+function setCourse(c){
+  course=c;
+  document.querySelectorAll('#course-toggle button').forEach(function(b){
+    b.className=b.textContent.indexOf(c)>=0?'on':'';
+  });
+  document.getElementById('lap-info').textContent=getLapLen()+' '+getLapUnit()+'/lap';
+  updateEvent();
+}
+
+function updateEvent(){
+  const dist=parseInt(document.getElementById('event-dist').value);
+  const stroke=document.getElementById('event-stroke').value;
+  const laps=getNumLaps();
+  document.getElementById('event-info').textContent=dist+' '+stroke+' · '+laps+' laps · '+getTotalDist()+' '+getLapUnit();
+}
+
+// ===== LANE ROPE TAPPING =====
+function startLaneTap(){
+  if(selectingLane){
+    selectingLane=false;
+    document.getElementById('vid-wrap').classList.remove('tapping');
+    document.getElementById('lane-btn').textContent='👆 Tap Lane Ropes';
+    return;
+  }
+  ropeTaps=[];ropeLeft=null;ropeRight=null;
+  selectingLane=true;
+  document.getElementById('vid-wrap').classList.add('tapping');
+  document.getElementById('lane-btn').textContent='🔴 Tapping... (0/4)';
+  document.getElementById('lane-status').textContent='Tap NEAR end of LEFT rope';
+  drawOverlay();
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  const overlay=document.getElementById('overlay');
+  if(overlay){
+    overlay.addEventListener('click',function(e){
+      if(!selectingLane||!V)return;
+      e.preventDefault();e.stopPropagation();
+      const rect=V.getBoundingClientRect();
+      // Map click to normalized video coords (accounting for object-fit:contain)
+      const vw=V.videoWidth, vh=V.videoHeight;
+      const scale=Math.min(rect.width/vw, rect.height/vh);
+      const rendW=vw*scale, rendH=vh*scale;
+      const offX=(rect.width-rendW)/2, offY=(rect.height-rendH)/2;
+      const nx=(e.clientX-rect.left-offX)/rendW;
+      const ny=(e.clientY-rect.top-offY)/rendH;
+      if(nx<0||nx>1||ny<0||ny>1)return;
+
+      ropeTaps.push({x:nx,y:ny});
+      const n=ropeTaps.length;
+      document.getElementById('lane-btn').textContent='🔴 Tapping... ('+n+'/4)';
+
+      const prompts=['Tap FAR end of LEFT rope','Tap NEAR end of RIGHT rope','Tap FAR end of RIGHT rope','Done!'];
+      document.getElementById('lane-status').textContent=n<4?prompts[n-1]:prompts[3];
+
+      if(n>=4){
+        // Build rope lines from taps
+        const lA=ropeTaps[0],lB=ropeTaps[1];
+        ropeLeft=lA.y<=lB.y?{x1:lA.x,y1:lA.y,x2:lB.x,y2:lB.y}:{x1:lB.x,y1:lB.y,x2:lA.x,y2:lA.y};
+        const rA=ropeTaps[2],rB=ropeTaps[3];
+        ropeRight=rA.y<=rB.y?{x1:rA.x,y1:rA.y,x2:rB.x,y2:rB.y}:{x1:rB.x,y1:rB.y,x2:rA.x,y2:rA.y};
+        selectingLane=false;
+        document.getElementById('vid-wrap').classList.remove('tapping');
+        document.getElementById('lane-btn').textContent='✓ Lane Selected — Tap to Redo';
+        document.getElementById('lane-status').textContent='Left + Right ropes defined';
+        showStatus('Lane ropes set. Ready to scan.','ok');
+      }
+      drawOverlay();
+    });
+  }
+});
+
+// ===== OVERLAY DRAWING =====
+function getVideoRect(){
+  if(!V)return null;
+  const rect=V.getBoundingClientRect();
+  const vw=V.videoWidth||1, vh=V.videoHeight||1;
+  const scale=Math.min(rect.width/vw, rect.height/vh);
+  const w=vw*scale, h=vh*scale;
+  return{x:(rect.width-w)/2, y:(rect.height-h)/2, w:w, h:h};
+}
+
+function drawOverlay(){
+  const c=document.getElementById('overlay');
+  if(!c||!V)return;
+  const rect=V.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  c.width=rect.width*dpr;c.height=rect.height*dpr;
+  c.style.width=rect.width+'px';c.style.height=rect.height+'px';
+  const ctx=c.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,rect.width,rect.height);
+
+  const vr=getVideoRect();
+  if(!vr)return;
+
+  // Draw tap points during selection
+  if(ropeTaps.length>0 && ropeTaps.length<4){
+    const colors=['#00e5ff','#00e5ff','#ffd740','#ffd740'];
+    const labels=['L-Near','L-Far','R-Near','R-Far'];
+    ropeTaps.forEach(function(p,i){
+      const px=vr.x+p.x*vr.w, py=vr.y+p.y*vr.h;
+      ctx.strokeStyle=colors[i];ctx.fillStyle=colors[i];ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(px,py,6,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(px-10,py);ctx.lineTo(px+10,py);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(px,py-10);ctx.lineTo(px,py+10);ctx.stroke();
+      ctx.font='bold 10px IBM Plex Mono';ctx.textAlign='left';
+      ctx.fillText(labels[i],px+10,py-4);
+    });
+    // Draw partial rope lines
+    if(ropeTaps.length>=2){
+      ctx.strokeStyle='rgba(0,229,255,0.5)';ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(vr.x+ropeTaps[0].x*vr.w,vr.y+ropeTaps[0].y*vr.h);
+      ctx.lineTo(vr.x+ropeTaps[1].x*vr.w,vr.y+ropeTaps[1].y*vr.h);
+      ctx.stroke();
+    }
+    return;
+  }
+
+  // Draw rope highlight lines (full length, camera-shift compensated)
+  if(ropeLeft&&ropeRight){
+    function ropeXatY(rope,yNorm){
+      const dy=rope.y2-rope.y1;
+      if(Math.abs(dy)<0.001) return(rope.x1+rope.x2)/2;
+      return rope.x1+(rope.x2-rope.x1)*(yNorm-rope.y1)/dy;
+    }
+    // Extend to full frame
+    const lxT=ropeXatY(ropeLeft,0),lxB=ropeXatY(ropeLeft,1);
+    const rxT=ropeXatY(ropeRight,0),rxB=ropeXatY(ropeRight,1);
+
+    ctx.save();
+    ctx.beginPath();ctx.rect(vr.x,vr.y,vr.w,vr.h);ctx.clip();
+
+    // Gradient: subtle at top (far), brighter at bottom (near)
+    var lg=ctx.createLinearGradient(0,vr.y,0,vr.y+vr.h);
+    lg.addColorStop(0,'rgba(0,229,255,0.10)');
+    lg.addColorStop(1,'rgba(0,229,255,0.40)');
+
+    // Left rope
+    ctx.strokeStyle=lg;ctx.lineWidth=6;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y);ctx.lineTo(vr.x+lxB*vr.w,vr.y+vr.h);ctx.stroke();
+    ctx.strokeStyle='rgba(0,229,255,0.8)';ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y);ctx.lineTo(vr.x+lxB*vr.w,vr.y+vr.h);ctx.stroke();
+
+    // Right rope
+    ctx.strokeStyle=lg;ctx.lineWidth=6;
+    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y);ctx.lineTo(vr.x+rxB*vr.w,vr.y+vr.h);ctx.stroke();
+    ctx.strokeStyle='rgba(0,229,255,0.8)';ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y);ctx.lineTo(vr.x+rxB*vr.w,vr.y+vr.h);ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // Draw beep marker
+  if(beepTime>0 && V.duration>0){
+    // Thin vertical line at beep position on the progress area isn't needed here
+    // but we show it on the graph
+  }
+
+  // Draw wall touch markers
+  if(wallTouches.length>0){
+    // Show current split info
+    const t=V.currentTime;
+    const startT=beepTime>0?beepTime:0;
+    ctx.fillStyle='rgba(255,255,255,0.8)';ctx.font='bold 12px IBM Plex Mono';ctx.textAlign='left';
+    let curLap=0;
+    for(let i=0;i<wallTouches.length;i++){
+      if(t>wallTouches[i].time) curLap=i+1;
+    }
+    if(curLap<=wallTouches.length){
+      const lapStart=curLap===0?startT:wallTouches[curLap-1].time;
+      const elapsed=Math.max(0,t-lapStart);
+      ctx.fillText('Lap '+(curLap+1)+': '+elapsed.toFixed(2)+'s',vr.x+8,vr.y+vr.h-8);
+    }
+  }
+}
+
+// ===== STATUS =====
+function showStatus(msg,type){
+  const el=document.getElementById('status-area');
+  el.innerHTML='<div class="status status-'+type+'">'+msg+'</div>';
+}
+
+// ===== BEEP DETECTION =====
+async function detectBeep(){
+  if(!V||!V.src)return -1;
+  try{
+    let audioBuf=null;
+
+    // Method 1: Real-time capture from video element
+    try{
+      audioBuf=await captureAudioFromVideo(5);
+    }catch(e){}
+
+    // Method 2: decodeAudioData from file bytes
+    if(!audioBuf&&videoFileRef){
+      try{
+        const ac=new(window.AudioContext||window.webkitAudioContext)();
+        const buf=await videoFileRef.arrayBuffer();
+        audioBuf=await ac.decodeAudioData(buf);
+        ac.close();
+      }catch(e){}
+    }
+
+    if(!audioBuf)return -1;
+
+    const sr=audioBuf.sampleRate;
+    const raw=audioBuf.getChannelData(0);
+
+    // Check for silence
+    let maxSamp=0;
+    for(let i=0;i<Math.min(raw.length,sr*3);i++){
+      if(Math.abs(raw[i])>maxSamp)maxSamp=Math.abs(raw[i]);
+    }
+    if(maxSamp<0.0001)return -1;
+
+    // RMS energy windows
+    const winSize=Math.floor(sr*0.02); // 20ms
+    const hopSize=Math.floor(sr*0.01); // 10ms hop
+    const rms=[];
+    for(let s=0;s+winSize<=raw.length;s+=hopSize){
+      let sq=0;
+      for(let i=s;i<s+winSize;i++)sq+=raw[i]*raw[i];
+      rms.push({time:s/sr,rms:Math.sqrt(sq/winSize)});
+    }
+
+    // Baseline from first 100ms
+    let baseEnd=0;
+    for(let i=0;i<rms.length;i++){if(rms[i].time>0.1){baseEnd=i;break}}
+    if(baseEnd<2)baseEnd=2;
+    let baseSum=0;
+    for(let i=0;i<baseEnd;i++)baseSum+=rms[i].rms;
+    const baseline=baseSum/baseEnd;
+
+    // Peak in first 5s
+    let peak=0,peakIdx=-1;
+    let searchEnd=rms.length;
+    for(let i=0;i<rms.length;i++){if(rms[i].time>5){searchEnd=i;break}}
+    for(let i=baseEnd;i<searchEnd;i++){
+      if(rms[i].rms>peak){peak=rms[i].rms;peakIdx=i}
+    }
+
+    // Threshold
+    let thresh=Math.max(baseline*1.5,baseline+(peak-baseline)*0.30);
+    if(baseline<0.005)thresh=Math.max(0.001,peak*0.10);
+
+    // Find first sustained crossing
+    let run=0;
+    for(let i=baseEnd;i<searchEnd;i++){
+      if(rms[i].rms>thresh){
+        run++;
+        if(run>=2){
+          const idx=i-run+1;
+          // Sub-sample interpolation
+          if(idx>0){
+            const t0=rms[idx-1].time,e0=rms[idx-1].rms;
+            const t1=rms[idx].time,e1=rms[idx].rms;
+            if(e1>e0){
+              const frac=Math.min(1,Math.max(0,((e0+e1)/2-e0)/(e1-e0)));
+              return t0+frac*(t1-t0);
+            }
+          }
+          return rms[idx].time;
+        }
+      }else{run=0}
+    }
+
+    // Fallback: sharpest jump
+    let bestJI=-1,bestJS=0;
+    for(let i=2;i<searchEnd-2;i++){
+      const bef=(rms[Math.max(0,i-2)].rms+rms[i-1].rms)/2;
+      const aft=(rms[i].rms+rms[Math.min(rms.length-1,i+1)].rms)/2;
+      const jmp=aft-bef;
+      if(jmp>bestJS&&jmp>0.0005){
+        let sc=0;
+        for(let j=i;j<Math.min(i+4,rms.length);j++){
+          if(rms[j].rms>bef+jmp*0.2)sc++;
+        }
+        if(sc>=2){bestJS=jmp;bestJI=i}
+      }
+    }
+    if(bestJI>=0)return rms[bestJI].time;
+
+    return -1;
+  }catch(e){
+    console.error('Beep detection error:',e);
+    return -1;
+  }
+}
+
+// Capture audio by playing video through Web Audio
+async function captureAudioFromVideo(seconds){
+  return new Promise(function(resolve,reject){
+    try{
+      const ac=new(window.AudioContext||window.webkitAudioContext)();
+      const source=ac.createMediaElementSource(V);
+      const dest=ac.createMediaStreamDestination();
+      source.connect(dest);
+      source.connect(ac.destination); // keep audible
+
+      const recorder=new MediaRecorder(dest.stream);
+      const chunks=[];
+      recorder.ondataavailable=function(e){if(e.data.size>0)chunks.push(e.data)};
+      recorder.onstop=async function(){
+        source.disconnect();
+        try{
+          const blob=new Blob(chunks,{type:'audio/webm'});
+          const buf=await blob.arrayBuffer();
+          const audioBuf=await ac.decodeAudioData(buf);
+          ac.close();
+          resolve(audioBuf);
+        }catch(e){ac.close();reject(e)}
+      };
+
+      const origTime=V.currentTime;
+      const origMuted=V.muted;
+      V.currentTime=0;
+      V.muted=false;
+
+      V.addEventListener('seeked',function onSeeked(){
+        V.removeEventListener('seeked',onSeeked);
+        recorder.start();
+        V.play();
+        setTimeout(function(){
+          recorder.stop();
+          V.pause();
+          V.currentTime=origTime;
+          V.muted=origMuted;
+        },seconds*1000);
+      },{once:true});
+    }catch(e){reject(e)}
+  });
+}
+
+// ===== MANUAL BEEP SET =====
+function setBeepManual(){
+  if(!V)return;
+  beepTime=V.currentTime;
+  showStatus('Beep set manually at '+beepTime.toFixed(3)+'s. Step to the exact horn frame and click again to refine.','ok');
+  if(scanned)rebuildSplits();
+}
+
+// ===== ROPE COLOR SAMPLING =====
+// Sample a thin strip of pixels along each rope at a given Y-position in the frame
+// Returns array of {hue, sat, lum} values along the rope
+
+function sampleRopeColors(canvas,ctx,rope,numSamples){
+  const w=canvas.width,h=canvas.height;
+  const colors=[];
+  // Sample along the rope from near (y2/bottom) to far (y1/top)
+  for(let i=0;i<numSamples;i++){
+    const t=i/(numSamples-1); // 0=near, 1=far
+    const y=rope.y2+t*(rope.y1-rope.y2); // near to far
+    const x=rope.x2+t*(rope.x1-rope.x2);
+    // Sample a small region around the rope position
+    const px=Math.round(x*w),py=Math.round(y*h);
+    const r=Math.max(1,Math.round(w*0.005)); // sample radius ~0.5% of width
+    let sumR=0,sumG=0,sumB=0,cnt=0;
+    for(let dy=-r;dy<=r;dy++){
+      for(let dx=-r;dx<=r;dx++){
+        const sx=px+dx,sy=py+dy;
+        if(sx>=0&&sx<w&&sy>=0&&sy<h){
+          const idx=(sy*w+sx)*4;
+          const imgData=ctx.getImageData(sx,sy,1,1).data;
+          sumR+=imgData[0];sumG+=imgData[1];sumB+=imgData[2];cnt++;
+        }
+      }
+    }
+    if(cnt>0){
+      const avg={r:sumR/cnt,g:sumG/cnt,b:sumB/cnt};
+      // Convert to HSL
+      const hsl=rgbToHsl(avg.r,avg.g,avg.b);
+      colors.push({t:t,y:y,x:x,h:hsl.h,s:hsl.s,l:hsl.l,r:avg.r,g:avg.g,b:avg.b});
+    }
+  }
+  return colors;
+}
+
+// Optimized batch sampling — get imageData once
+function sampleRopeColorsBatch(imageData,w,h,rope,numSamples){
+  const data=imageData.data;
+  const colors=[];
+  for(let i=0;i<numSamples;i++){
+    const t=i/(numSamples-1);
+    const y=rope.y2+t*(rope.y1-rope.y2);
+    const x=rope.x2+t*(rope.x1-rope.x2);
+    const px=Math.round(x*w),py=Math.round(y*h);
+    const r=Math.max(1,Math.round(w*0.004));
+    let sumR=0,sumG=0,sumB=0,cnt=0;
+    for(let dy=-r;dy<=r;dy++){
+      for(let dx=-r;dx<=r;dx++){
+        const sx=px+dx,sy=py+dy;
+        if(sx>=0&&sx<w&&sy>=0&&sy<h){
+          const idx=(sy*w+sx)*4;
+          sumR+=data[idx];sumG+=data[idx+1];sumB+=data[idx+2];cnt++;
+        }
+      }
+    }
+    if(cnt>0){
+      colors.push({t:t,r:sumR/cnt,g:sumG/cnt,b:sumB/cnt});
+    }
+  }
+  return colors;
+}
+
+function rgbToHsl(r,g,b){
+  r/=255;g/=255;b/=255;
+  const max=Math.max(r,g,b),min=Math.min(r,g,b);
+  let h=0,s=0,l=(max+min)/2;
+  if(max!==min){
+    const d=max-min;
+    s=l>0.5?d/(2-max-min):d/(max+min);
+    if(max===r)h=((g-b)/d+(g<b?6:0))/6;
+    else if(max===g)h=((b-r)/d+2)/6;
+    else h=((r-g)/d+4)/6;
+  }
+  return{h:h*360,s:s,l:l};
+}
+
+// ===== ROPE PATTERN ANALYSIS =====
+// Detect the scrolling rate of rope float pattern between consecutive frames
+// by cross-correlating the color profiles along the rope
+
+function computeRopeShift(prevColors,currColors){
+  if(!prevColors||!currColors||prevColors.length<10||currColors.length<10)return 0;
+  const n=prevColors.length;
+  // Convert to luminance arrays
+  const prevL=prevColors.map(function(c){return 0.299*c.r+0.587*c.g+0.114*c.b});
+  const currL=currColors.map(function(c){return 0.299*c.r+0.587*c.g+0.114*c.b});
+
+  // Cross-correlate with shifts from -n/4 to +n/4
+  const maxShift=Math.floor(n/4);
+  let bestShift=0, bestCorr=-Infinity;
+  for(let shift=-maxShift;shift<=maxShift;shift++){
+    let corr=0,cnt=0;
+    for(let i=0;i<n;i++){
+      const j=i+shift;
+      if(j>=0&&j<n){
+        // Negative SAD (higher = better match)
+        corr-=Math.abs(prevL[i]-currL[j]);
+        cnt++;
+      }
+    }
+    if(cnt>0){corr/=cnt}
+    if(corr>bestCorr){bestCorr=corr;bestShift=shift}
+  }
+  // Return shift as fraction of rope length
+  return bestShift/n;
+}
+
+// ===== WALL DETECTION from rope color patterns =====
+// When the swimmer approaches a wall, the visible portion of the rope
+// shifts rapidly as the camera pans. The KEY signal: the rope float
+// pattern scrolls in one direction during a lap, then reverses at each wall.
+
+function detectWallsFromRopeScroll(ropeLog,sampleFps){
+  if(ropeLog.length<20)return[];
+  // Compute per-frame rope scroll velocity
+  const velocity=[];
+  for(let i=1;i<ropeLog.length;i++){
+    const dt=ropeLog[i].time-ropeLog[i-1].time;
+    if(dt<0.001)continue;
+    const shiftL=computeRopeShift(ropeLog[i-1].leftColors,ropeLog[i].leftColors);
+    const shiftR=computeRopeShift(ropeLog[i-1].rightColors,ropeLog[i].rightColors);
+    // Average both ropes
+    const avgShift=(shiftL+shiftR)/2;
+    velocity.push({time:ropeLog[i].time,v:avgShift/dt,shiftL:shiftL,shiftR:shiftR});
+  }
+
+  if(velocity.length<10)return[];
+
+  // Smooth velocity
+  const smoothV=[];
+  const hw=2; // half-window
+  for(let i=0;i<velocity.length;i++){
+    let sum=0,cnt=0;
+    for(let j=Math.max(0,i-hw);j<=Math.min(velocity.length-1,i+hw);j++){
+      sum+=velocity[j].v;cnt++;
+    }
+    smoothV.push({time:velocity[i].time,v:sum/cnt});
+  }
+
+  // Detect zero crossings of velocity (direction reversals = wall touches)
+  const walls=[];
+  const minGap=getLapLen()===50?15:5; // minimum seconds between walls
+  let lastWallTime=-minGap*2;
+
+  for(let i=1;i<smoothV.length;i++){
+    if(smoothV[i-1].v*smoothV[i].v<0){ // sign change
+      const t=smoothV[i].time;
+      if(t-lastWallTime>=minGap){
+        // Verify it's a real reversal (not just noise)
+        // Check that velocity is sustained in opposite direction afterward
+        let sustained=0;
+        for(let j=i;j<Math.min(i+5,smoothV.length);j++){
+          if(Math.abs(smoothV[j].v)>0.001)sustained++;
+        }
+        if(sustained>=2){
+          walls.push({time:t,confidence:Math.min(1,Math.abs(smoothV[i].v)*10),method:'rope-scroll'});
+          lastWallTime=t;
+        }
+      }
+    }
+  }
+
+  return walls;
+}
+
+// ===== MOTION ENERGY WALL DETECTION (backup) =====
+// Detects walls from swimming→still→swimming transitions
+function detectWallsFromMotion(motionLog,sampleFps){
+  if(motionLog.length<20)return[];
+  // Smooth
+  const smoothE=[];
+  const hw=3;
+  for(let i=0;i<motionLog.length;i++){
+    let sum=0,cnt=0;
+    for(let j=Math.max(0,i-hw);j<=Math.min(motionLog.length-1,i+hw);j++){
+      sum+=motionLog[j].energy;cnt++;
+    }
+    smoothE.push({time:motionLog[i].time,e:sum/cnt});
+  }
+
+  // Find the median energy level
+  const sorted=smoothE.map(function(s){return s.e}).sort(function(a,b){return a-b});
+  const median=sorted[Math.floor(sorted.length/2)];
+  const threshold=median*0.4; // below 40% of median = underwater/wall phase
+
+  // Find dips below threshold
+  const walls=[];
+  const minGap=getLapLen()===50?15:5;
+  let inDip=false,dipStart=-1;
+  let lastWallTime=-minGap*2;
+
+  for(let i=0;i<smoothE.length;i++){
+    if(smoothE[i].e<threshold&&!inDip){
+      inDip=true;dipStart=i;
+    }else if(smoothE[i].e>=threshold&&inDip){
+      inDip=false;
+      const dipMid=smoothE[Math.floor((dipStart+i)/2)].time;
+      if(dipMid-lastWallTime>=minGap){
+        walls.push({time:smoothE[dipStart].time,confidence:0.5,method:'motion-dip'});
+        lastWallTime=smoothE[dipStart].time;
+      }
+    }
+  }
+  return walls;
+}
+
+// ===== BLOCK DEPARTURE DETECTION =====
+function detectBlockDeparture(motionLog,beepT,sampleFps){
+  if(beepT<0||motionLog.length<5)return -1;
+  // Look for the first big motion spike 0.1-2.0s after beep (dive splash)
+  const searchStart=beepT+0.1;
+  const searchEnd=beepT+2.5;
+  let maxE=0,maxT=-1;
+  for(let i=0;i<motionLog.length;i++){
+    if(motionLog[i].time>=searchStart&&motionLog[i].time<=searchEnd){
+      if(motionLog[i].energy>maxE){maxE=motionLog[i].energy;maxT=motionLog[i].time}
+    }
+  }
+  return maxT;
+}
+
+// ===== MAIN SCAN =====
+async function startScan(){
+  if(!V||!videoReady||scanning)return;
+  if(!ropeLeft||!ropeRight){
+    showStatus('Please tap lane ropes first (4 points: near+far on each rope)','warn');
+    return;
+  }
+
+  scanning=true;scanned=false;
+  wallTouches=[];ropeColorLog=[];beepTime=-1;blockDepartTime=-1;
+  document.getElementById('scan-btn').textContent='Scanning...';
+  document.getElementById('progress').style.width='0%';
+  document.getElementById('results').style.display='none';
+  showStatus('Detecting beep/horn...','info');
+
+  // 1. BEEP DETECTION
+  beepTime=await detectBeep();
+  if(beepTime>0){
+    showStatus('Beep detected at '+beepTime.toFixed(3)+'s. Scanning video...','ok');
+  }else{
+    showStatus('No beep detected — you can set it manually. Scanning video...','warn');
+  }
+
+  // 2. SCAN VIDEO — sample rope colors + motion energy at each frame
+  const sC=document.getElementById('scan-canvas');
+  const sx=sC.getContext('2d');
+  const fps=10; // 10fps for rope color sampling (enough for pattern tracking)
+  const frameInterval=1/fps;
+  const duration=V.duration;
+  const totalFrames=Math.floor(duration*fps);
+  const ROPE_SAMPLES=40; // sample 40 points along each rope per frame
+
+  // Scale scan canvas
+  const scanW=480, scanH=Math.round(480*V.videoHeight/V.videoWidth);
+  sC.width=scanW;sC.height=scanH;
+
+  const motionLog=[];
+  let prevImageData=null;
+
+  for(let i=0;i<totalFrames;i++){
+    const t=i*frameInterval;
+    V.currentTime=t;
+    await new Promise(function(r){V.onseeked=r;setTimeout(r,200)});
+
+    sx.drawImage(V,0,0,scanW,scanH);
+    const imageData=sx.getImageData(0,0,scanW,scanH);
+
+    // Sample rope colors
+    const leftColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeLeft,ROPE_SAMPLES);
+    const rightColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeRight,ROPE_SAMPLES);
+    ropeColorLog.push({time:t,leftColors:leftColors,rightColors:rightColors});
+
+    // Motion energy (simple frame diff in the lane region)
+    if(prevImageData){
+      let energy=0,cnt=0;
+      const d1=prevImageData.data, d2=imageData.data;
+      // Sample every 4th pixel for speed
+      for(let p=0;p<d1.length;p+=16){
+        energy+=Math.abs(d2[p]-d1[p])+Math.abs(d2[p+1]-d1[p+1])+Math.abs(d2[p+2]-d1[p+2]);
+        cnt++;
+      }
+      motionLog.push({time:t,energy:cnt>0?energy/cnt:0});
+    }
+    prevImageData=new ImageData(new Uint8ClampedArray(imageData.data),scanW,scanH);
+
+    // Progress
+    const pct=Math.round(i/totalFrames*100);
+    document.getElementById('progress').style.width=pct+'%';
+    document.getElementById('scan-btn').textContent='Scanning... '+pct+'%';
+
+    if(i%5===0)await new Promise(function(r){setTimeout(r,0)});
+  }
+
+  // 3. DETECT WALLS from rope scroll pattern
+  showStatus('Analyzing rope patterns for wall detection...','info');
+  const ropeWalls=detectWallsFromRopeScroll(ropeColorLog,fps);
+  const motionWalls=detectWallsFromMotion(motionLog,fps);
+
+  // Merge: prefer rope-based, supplement with motion-based
+  wallTouches=mergeWallDetections(ropeWalls,motionWalls);
+
+  // 4. DETECT BLOCK DEPARTURE
+  if(beepTime>0){
+    blockDepartTime=detectBlockDeparture(motionLog,beepTime,fps);
+  }
+
+  // 5. BUILD RESULTS
+  scanning=false;scanned=true;
+  document.getElementById('scan-btn').textContent='⚡ RE-SCAN';
+  document.getElementById('progress').style.width='100%';
+
+  rebuildSplits();
+  drawGraph(motionLog,ropeColorLog);
+
+  const nWalls=wallTouches.length;
+  const expected=getNumLaps();
+  let conf='HIGH';
+  if(Math.abs(nWalls-expected)===1)conf='MEDIUM';
+  if(Math.abs(nWalls-expected)>1)conf='LOW';
+  showStatus('Scan complete: '+nWalls+' walls detected (expected '+expected+'), confidence: '+conf,'ok');
+  console.log('Wall touches:',wallTouches);
+  console.log('Beep:',beepTime,'Block depart:',blockDepartTime);
+}
+
+// Merge rope-scroll and motion wall detections
+function mergeWallDetections(ropeWalls,motionWalls){
+  // Start with rope-based walls (higher confidence)
+  const merged=[...ropeWalls];
+
+  // Add motion walls that don't overlap with any rope wall (within 2s)
+  motionWalls.forEach(function(mw){
+    let overlaps=false;
+    for(let i=0;i<merged.length;i++){
+      if(Math.abs(merged[i].time-mw.time)<2.0){overlaps=true;break}
+    }
+    if(!overlaps)merged.push(mw);
+  });
+
+  // Sort by time
+  merged.sort(function(a,b){return a.time-b.time});
+
+  // Filter to expected number of walls (take the most confident ones if too many)
+  const expected=getNumLaps();
+  if(merged.length>expected){
+    // Keep the ones with highest confidence
+    merged.sort(function(a,b){return b.confidence-a.confidence});
+    merged.length=expected;
+    merged.sort(function(a,b){return a.time-b.time});
+  }
+
+  return merged;
+}
+
+// ===== SPLIT TABLE =====
+function rebuildSplits(){
+  if(!scanned)return;
+  const table=document.getElementById('split-table');
+  const startT=beepTime>0?beepTime:0;
+  document.getElementById('results').style.display='block';
+
+  let html='<tr><th>#</th><th>WALL TIME</th><th>SPLIT</th><th>CUM</th><th>METHOD</th></tr>';
+  let prev=startT;
+
+  // Block departure (reaction time)
+  if(blockDepartTime>0&&beepTime>0){
+    const rt=blockDepartTime-beepTime;
+    html+='<tr><td>RT</td><td class="time">'+blockDepartTime.toFixed(2)+'s</td>';
+    html+='<td class="split">'+rt.toFixed(2)+'s</td><td></td><td>reaction</td></tr>';
+  }
+
+  wallTouches.forEach(function(w,i){
+    const split=w.time-prev;
+    const cum=w.time-startT;
+    const isFinish=i===wallTouches.length-1;
+    html+='<tr><td>'+(isFinish?'FIN':(i+1))+'</td>';
+    html+='<td class="time">'+w.time.toFixed(2)+'s</td>';
+    html+='<td class="split">'+split.toFixed(2)+'s</td>';
+    html+='<td>'+cum.toFixed(2)+'s</td>';
+    html+='<td>'+w.method+(w.confidence?' ('+Math.round(w.confidence*100)+'%)':'')+'</td></tr>';
+    prev=w.time;
+  });
+
+  // Compare with official time
+  const officialInput=document.getElementById('official-time').value;
+  if(officialInput&&wallTouches.length>0){
+    let officialS=0;
+    if(officialInput.indexOf(':')>=0){
+      const parts=officialInput.split(':');
+      officialS=parseFloat(parts[0])*60+parseFloat(parts[1]);
+    }else{
+      officialS=parseFloat(officialInput);
+    }
+    if(officialS>0){
+      const measured=wallTouches[wallTouches.length-1].time-startT;
+      const diff=measured-officialS;
+      html+='<tr><td colspan="5" style="padding-top:8px;color:'+(Math.abs(diff)<0.2?'#76ff03':'#ff5252')+'">';
+      html+='Official: '+officialS.toFixed(2)+'s · Measured: '+measured.toFixed(2)+'s · Diff: '+(diff>=0?'+':'')+diff.toFixed(2)+'s</td></tr>';
+    }
+  }
+
+  table.innerHTML=html;
+}
+
+// ===== GRAPH =====
+function drawGraph(motionLog,ropeLog){
+  const canvas=document.getElementById('graph');
+  const rect=canvas.parentElement.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;
+  canvas.style.width=rect.width+'px';canvas.style.height=rect.height+'px';
+  const g=canvas.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+
+  const W=rect.width,H=rect.height;
+  const pad={l:40,r:10,t:10,b:20};
+  const gw=W-pad.l-pad.r, gh=H-pad.t-pad.b;
+
+  g.fillStyle='#0a0a0c';g.fillRect(0,0,W,H);
+
+  if(motionLog.length<2)return;
+
+  const tMin=motionLog[0].time, tMax=motionLog[motionLog.length-1].time;
+  const eMax=Math.max(...motionLog.map(function(m){return m.energy}))*1.1;
+
+  function tx(t){return pad.l+(t-tMin)/(tMax-tMin)*gw}
+  function ty(e){return pad.t+gh-e/eMax*gh}
+
+  // Grid lines
+  g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;
+  for(let t=0;t<=tMax;t+=10){
+    const x=tx(t);
+    g.beginPath();g.moveTo(x,pad.t);g.lineTo(x,pad.t+gh);g.stroke();
+    g.fillStyle='#3a5a6a';g.font='9px IBM Plex Mono';g.textAlign='center';
+    g.fillText(t+'s',x,H-4);
+  }
+
+  // Motion energy line
+  g.strokeStyle='rgba(0,229,255,0.5)';g.lineWidth=1.5;
+  g.beginPath();
+  motionLog.forEach(function(m,i){
+    const x=tx(m.time),y=ty(m.energy);
+    if(i===0)g.moveTo(x,y);else g.lineTo(x,y);
+  });
+  g.stroke();
+
+  // Beep marker
+  if(beepTime>0){
+    g.strokeStyle='#76ff03';g.lineWidth=2;g.setLineDash([4,3]);
+    const bx=tx(beepTime);
+    g.beginPath();g.moveTo(bx,pad.t);g.lineTo(bx,pad.t+gh);g.stroke();
+    g.setLineDash([]);
+    g.fillStyle='#76ff03';g.font='bold 9px IBM Plex Mono';g.textAlign='left';
+    g.fillText('BEEP',bx+3,pad.t+10);
+  }
+
+  // Wall markers
+  wallTouches.forEach(function(w,i){
+    const wx=tx(w.time);
+    g.strokeStyle='#ff5252';g.lineWidth=1.5;g.setLineDash([3,2]);
+    g.beginPath();g.moveTo(wx,pad.t);g.lineTo(wx,pad.t+gh);g.stroke();
+    g.setLineDash([]);
+    g.fillStyle='#ff5252';g.font='bold 9px IBM Plex Mono';g.textAlign='center';
+    g.fillText('W'+(i+1),wx,pad.t+10);
+  });
+
+  // Y axis label
+  g.save();g.translate(10,pad.t+gh/2);g.rotate(-Math.PI/2);
+  g.fillStyle='#3a5a6a';g.font='9px IBM Plex Mono';g.textAlign='center';
+  g.fillText('Motion',0,0);
+  g.restore();
+}
+
+// ===== EVENT LISTENERS =====
+document.addEventListener('DOMContentLoaded',function(){
+  const v=document.getElementById('V');
+  if(v){
+    v.addEventListener('timeupdate',onTimeUpdate);
+    v.addEventListener('play',function(){
+      playing=true;
+      document.getElementById('play-btn').textContent='⏸ PAUSE';
+    });
+    v.addEventListener('pause',function(){
+      playing=false;
+      document.getElementById('play-btn').textContent='▶ PLAY';
+    });
+  }
+  updateEvent();
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown',function(e){
+  if(!V||!videoReady)return;
+  if(e.target.tagName==='INPUT')return;
+  switch(e.key){
+    case ' ':e.preventDefault();togglePlay();break;
+    case 'ArrowLeft':e.preventDefault();stepFrame(e.shiftKey?-10:-1);break;
+    case 'ArrowRight':e.preventDefault();stepFrame(e.shiftKey?10:1);break;
+    case 'b':case 'B':setBeepManual();break;
+  }
+});
+</script>
+</body>
+</html>
