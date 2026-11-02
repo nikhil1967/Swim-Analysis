@@ -182,8 +182,9 @@ select.inp{-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.
 
     <!-- LANE SELECTION -->
     <div class="controls">
-      <button class="btn btn-primary" id="lane-btn" onclick="startLaneTap()">👆 Tap Lane Ropes</button>
-      <span class="unit" id="lane-status">Optional: tap ropes for supplementary speed data</span>
+      <button class="btn btn-primary" id="lane-btn" onclick="startLaneTap()">👆 Tap Your Swimmer</button>
+      <span class="unit" id="lane-status">Tap swimmer to auto-detect their lane</span>
+      <button class="btn" id="clear-lanes-btn" onclick="clearLanes()" style="display:none">✕ Clear</button>
     </div>
 
     <!-- SCAN -->
@@ -260,11 +261,14 @@ function classifyWall(wallIdx){
   return{type:type,leg:leg,lapInLeg:lapInLeg};
 }
 
-// Lane rope data (normalized 0-1 coords)
-let ropeTaps=[];   // [{x,y}, ...] — 4 tap points
-let ropeLeft=null;  // {x1,y1,x2,y2} — left rope endpoints (y1=top/far, y2=bottom/near)
-let ropeRight=null; // {x1,y1,x2,y2} — right rope endpoints
+// Lane detection
+let detectedRopes=[];  // [{yNorm, confidence}] — auto-detected rope Y positions (normalized 0-1)
+let selectedLanes=[];  // [{tapY, ropeAbove, ropeBelow, label}] — user-tapped lane selections
+let ropeLeft=null;     // legacy compat: {x1,y1,x2,y2} — built from detected ropes
+let ropeRight=null;    // legacy compat
 let selectingLane=false;
+let ropesDetected=false;
+let avgFrameData=null; // averaged frame ImageData for rope detection
 
 // Scan results
 let beepTime=-1;
@@ -391,19 +395,219 @@ function updateEvent(){
   }
 }
 
-// ===== LANE ROPE TAPPING =====
+// ===== AUTO ROPE DETECTION via Frame Averaging =====
+
+async function detectRopesFromVideo(){
+  if(!V||!videoReady)return[];
+  showStatus('Averaging frames to detect lane ropes...','info');
+
+  const sC=document.getElementById('scan-canvas');
+  const sx=sC.getContext('2d');
+  const scanW=480, scanH=Math.round(480*V.videoHeight/V.videoWidth);
+  sC.width=scanW;sC.height=scanH;
+
+  // Average ~40 frames spread across the video — swimmers blur, ropes stay sharp
+  const numFrames=40;
+  const duration=V.duration;
+  const avgR=new Float32Array(scanW*scanH);
+  const avgG=new Float32Array(scanW*scanH);
+  const avgB=new Float32Array(scanW*scanH);
+
+  for(let i=0;i<numFrames;i++){
+    const t=(i+0.5)/numFrames*duration;
+    V.currentTime=t;
+    await new Promise(function(r){V.onseeked=r;setTimeout(r,200)});
+    sx.drawImage(V,0,0,scanW,scanH);
+    const d=sx.getImageData(0,0,scanW,scanH).data;
+    for(let p=0;p<scanW*scanH;p++){
+      avgR[p]+=d[p*4]/numFrames;
+      avgG[p]+=d[p*4+1]/numFrames;
+      avgB[p]+=d[p*4+2]/numFrames;
+    }
+    const pct=Math.round(i/numFrames*50);
+    document.getElementById('progress').style.width=pct+'%';
+  }
+
+  // Store averaged frame for visualization
+  avgFrameData={w:scanW,h:scanH,r:avgR,g:avgG,b:avgB};
+
+  // Detect horizontal rope lines by scanning for strong horizontal edges
+  // Ropes create horizontal bands of consistent color that differ from water above/below
+  // Compute per-row horizontal variance (ropes = low variance = uniform line across frame)
+  // and per-row vertical gradient (rope boundary = sharp color change between rows)
+  const rowLuminance=new Float32Array(scanH);
+  const rowVariance=new Float32Array(scanH);
+
+  for(let y=0;y<scanH;y++){
+    let sumL=0,sumL2=0;
+    for(let x=0;x<scanW;x++){
+      const p=y*scanW+x;
+      const lum=avgR[p]*0.299+avgG[p]*0.587+avgB[p]*0.114;
+      sumL+=lum;
+      sumL2+=lum*lum;
+    }
+    rowLuminance[y]=sumL/scanW;
+    rowVariance[y]=sumL2/scanW-(sumL/scanW)*(sumL/scanW);
+  }
+
+  // Compute vertical gradient (difference between consecutive rows)
+  const rowGradient=new Float32Array(scanH);
+  for(let y=1;y<scanH-1;y++){
+    // Color gradient: compare RGB values not just luminance
+    let grad=0;
+    for(let x=0;x<scanW;x+=4){
+      const p1=(y-1)*scanW+x, p2=(y+1)*scanW+x;
+      grad+=Math.abs(avgR[p2]-avgR[p1])+Math.abs(avgG[p2]-avgG[p1])+Math.abs(avgB[p2]-avgB[p1]);
+    }
+    rowGradient[y]=grad/(scanW/4);
+  }
+
+  // Smooth the gradient to find peaks (rope positions)
+  const smoothGrad=new Float32Array(scanH);
+  const hw=3;
+  for(let y=0;y<scanH;y++){
+    let s=0,c=0;
+    for(let j=Math.max(0,y-hw);j<=Math.min(scanH-1,y+hw);j++){
+      s+=rowGradient[j];c++;
+    }
+    smoothGrad[y]=s/c;
+  }
+
+  // Also compute horizontal "straightness" — ropes are straight horizontal features
+  // For each row, compute the horizontal auto-correlation at small shifts
+  // High auto-correlation at shift=0 with low variance = rope-like feature
+  // Actually, simpler: ropes have a distinctive periodic color pattern (alternating floats)
+  // Detect by checking for periodic intensity variation along each row
+  const rowPeriodicity=new Float32Array(scanH);
+  for(let y=2;y<scanH-2;y++){
+    // Check if this row has alternating color pattern (rope floats)
+    let transitions=0;
+    let prevBright=avgR[y*scanW]*0.299+avgG[y*scanW]*0.587+avgB[y*scanW]*0.114>128;
+    for(let x=4;x<scanW;x+=4){
+      const p=y*scanW+x;
+      const bright=avgR[p]*0.299+avgG[p]*0.587+avgB[p]*0.114>128;
+      if(bright!==prevBright){transitions++;prevBright=bright}
+    }
+    // Ropes typically have 10-50 float transitions across the frame
+    rowPeriodicity[y]=transitions>=5&&transitions<=80?transitions:0;
+  }
+
+  // Find rope positions: peaks in vertical gradient that also have periodicity nearby
+  const ropes=[];
+  const minGap=Math.floor(scanH*0.03); // minimum gap between rope lines (~3% of frame)
+
+  // Find the median and threshold for gradient peaks
+  const sortedGrad=[...smoothGrad].sort(function(a,b){return a-b});
+  const gradMedian=sortedGrad[Math.floor(sortedGrad.length*0.5)];
+  const gradP75=sortedGrad[Math.floor(sortedGrad.length*0.75)];
+  const gradThresh=gradP75+0.5*(gradP75-gradMedian);
+
+  for(let y=5;y<scanH-5;y++){
+    if(smoothGrad[y]<gradThresh)continue;
+    // Is this a local maximum?
+    let isMax=true;
+    for(let dy=-minGap;dy<=minGap;dy++){
+      const yy=y+dy;
+      if(yy>=0&&yy<scanH&&yy!==y&&smoothGrad[yy]>smoothGrad[y]){isMax=false;break}
+    }
+    if(!isMax)continue;
+
+    // Check for periodicity (rope float pattern) in a band around this row
+    let hasPeriodicity=false;
+    for(let dy=-3;dy<=3;dy++){
+      const yy=y+dy;
+      if(yy>=0&&yy<scanH&&rowPeriodicity[yy]>0){hasPeriodicity=true;break}
+    }
+
+    const conf=hasPeriodicity?0.8:0.4;
+    ropes.push({yNorm:y/scanH,confidence:conf,gradStrength:smoothGrad[y]});
+  }
+
+  // Sort by Y position (top to bottom)
+  ropes.sort(function(a,b){return a.yNorm-b.yNorm});
+
+  console.log('Detected rope lines:',ropes);
+  return ropes;
+}
+
+// ===== LANE SELECTION (tap on swimmer) =====
 function startLaneTap(){
   if(selectingLane){
     selectingLane=false;
     document.getElementById('vid-wrap').classList.remove('tapping');
-    document.getElementById('lane-btn').textContent='👆 Tap Lane Ropes';
+    document.getElementById('lane-btn').textContent='👆 Tap Your Swimmer';
     return;
   }
-  ropeTaps=[];ropeLeft=null;ropeRight=null;
+  if(!ropesDetected){
+    showStatus('Scan the video first to detect lane ropes, then tap your swimmer.','warn');
+    return;
+  }
   selectingLane=true;
   document.getElementById('vid-wrap').classList.add('tapping');
-  document.getElementById('lane-btn').textContent='🔴 Tapping... (0/4)';
-  document.getElementById('lane-status').textContent='Tap NEAR end of LEFT rope';
+  document.getElementById('lane-btn').textContent='🔴 Tap on your swimmer...';
+  document.getElementById('lane-status').textContent='Tap anywhere on the swimmer you want to track';
+  drawOverlay();
+}
+
+function clearLanes(){
+  selectedLanes=[];
+  ropeLeft=null;ropeRight=null;
+  document.getElementById('lane-btn').textContent='👆 Tap Your Swimmer';
+  document.getElementById('lane-status').textContent='Tap swimmer to auto-detect their lane';
+  document.getElementById('clear-lanes-btn').style.display='none';
+  drawOverlay();
+}
+
+function selectLaneAtPoint(nx,ny){
+  if(detectedRopes.length<2){
+    showStatus('Not enough ropes detected to identify lanes. Try scanning again.','warn');
+    return;
+  }
+
+  // Find the two ropes that bracket this Y position (one above, one below)
+  let ropeAbove=null, ropeBelow=null;
+  for(let i=0;i<detectedRopes.length;i++){
+    if(detectedRopes[i].yNorm<=ny){
+      ropeAbove=detectedRopes[i];
+    }
+    if(detectedRopes[i].yNorm>ny&&!ropeBelow){
+      ropeBelow=detectedRopes[i];
+    }
+  }
+
+  // Edge cases: swimmer tapped above all ropes or below all ropes
+  if(!ropeAbove&&detectedRopes.length>=1) ropeAbove={yNorm:0,confidence:0.3}; // frame top
+  if(!ropeBelow&&detectedRopes.length>=1) ropeBelow={yNorm:1,confidence:0.3}; // frame bottom
+
+  // Check if this lane is already selected (within 5% of existing tap)
+  for(let i=0;i<selectedLanes.length;i++){
+    if(Math.abs(selectedLanes[i].tapY-ny)<0.05){
+      showStatus('Lane already selected. Tap a different swimmer or clear.','warn');
+      return;
+    }
+  }
+
+  const laneNum=selectedLanes.length+1;
+  const lane={
+    tapX:nx, tapY:ny,
+    ropeAbove:ropeAbove, ropeBelow:ropeBelow,
+    label:'Swimmer '+laneNum
+  };
+  selectedLanes.push(lane);
+
+  // Build legacy rope vars from first selected lane (for rope color sampling compatibility)
+  if(selectedLanes.length===1){
+    const ra=lane.ropeAbove, rb=lane.ropeBelow;
+    ropeLeft={x1:0.1,y1:ra.yNorm,x2:0.1,y2:rb.yNorm};
+    ropeRight={x1:0.9,y1:ra.yNorm,x2:0.9,y2:rb.yNorm};
+  }
+
+  selectingLane=false;
+  document.getElementById('vid-wrap').classList.remove('tapping');
+  document.getElementById('lane-btn').textContent='👆 + Add Another Swimmer';
+  document.getElementById('lane-status').textContent=selectedLanes.length+' lane(s) selected';
+  document.getElementById('clear-lanes-btn').style.display='inline-block';
+  showStatus('Lane '+laneNum+' selected (ropes at '+Math.round(ropeAbove.yNorm*100)+'% and '+Math.round(ropeBelow.yNorm*100)+'% of frame)','ok');
   drawOverlay();
 }
 
@@ -414,7 +618,6 @@ document.addEventListener('DOMContentLoaded',function(){
       if(!selectingLane||!V)return;
       e.preventDefault();e.stopPropagation();
       const rect=V.getBoundingClientRect();
-      // Map click to normalized video coords (accounting for object-fit:contain)
       const vw=V.videoWidth, vh=V.videoHeight;
       const scale=Math.min(rect.width/vw, rect.height/vh);
       const rendW=vw*scale, rendH=vh*scale;
@@ -423,26 +626,7 @@ document.addEventListener('DOMContentLoaded',function(){
       const ny=(e.clientY-rect.top-offY)/rendH;
       if(nx<0||nx>1||ny<0||ny>1)return;
 
-      ropeTaps.push({x:nx,y:ny});
-      const n=ropeTaps.length;
-      document.getElementById('lane-btn').textContent='🔴 Tapping... ('+n+'/4)';
-
-      const prompts=['Tap FAR end of LEFT rope','Tap NEAR end of RIGHT rope','Tap FAR end of RIGHT rope','Done!'];
-      document.getElementById('lane-status').textContent=n<4?prompts[n-1]:prompts[3];
-
-      if(n>=4){
-        // Build rope lines from taps
-        const lA=ropeTaps[0],lB=ropeTaps[1];
-        ropeLeft=lA.y<=lB.y?{x1:lA.x,y1:lA.y,x2:lB.x,y2:lB.y}:{x1:lB.x,y1:lB.y,x2:lA.x,y2:lA.y};
-        const rA=ropeTaps[2],rB=ropeTaps[3];
-        ropeRight=rA.y<=rB.y?{x1:rA.x,y1:rA.y,x2:rB.x,y2:rB.y}:{x1:rB.x,y1:rB.y,x2:rA.x,y2:rA.y};
-        selectingLane=false;
-        document.getElementById('vid-wrap').classList.remove('tapping');
-        document.getElementById('lane-btn').textContent='✓ Lane Selected — Tap to Redo';
-        document.getElementById('lane-status').textContent='Left + Right ropes defined';
-        showStatus('Lane ropes set. Ready to scan.','ok');
-      }
-      drawOverlay();
+      selectLaneAtPoint(nx,ny);
     });
   }
 });
@@ -471,57 +655,64 @@ function drawOverlay(){
   const vr=getVideoRect();
   if(!vr)return;
 
-  // Draw tap points during selection
-  if(ropeTaps.length>0 && ropeTaps.length<4){
-    const colors=['#00e5ff','#00e5ff','#ffd740','#ffd740'];
-    const labels=['L-Near','L-Far','R-Near','R-Far'];
-    ropeTaps.forEach(function(p,i){
-      const px=vr.x+p.x*vr.w, py=vr.y+p.y*vr.h;
-      ctx.strokeStyle=colors[i];ctx.fillStyle=colors[i];ctx.lineWidth=2;
-      ctx.beginPath();ctx.arc(px,py,6,0,Math.PI*2);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(px-10,py);ctx.lineTo(px+10,py);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(px,py-10);ctx.lineTo(px,py+10);ctx.stroke();
-      ctx.font='bold 10px IBM Plex Mono';ctx.textAlign='left';
-      ctx.fillText(labels[i],px+10,py-4);
-    });
-    // Draw partial rope lines
-    if(ropeTaps.length>=2){
-      ctx.strokeStyle='rgba(0,229,255,0.5)';ctx.lineWidth=2;
-      ctx.beginPath();
-      ctx.moveTo(vr.x+ropeTaps[0].x*vr.w,vr.y+ropeTaps[0].y*vr.h);
-      ctx.lineTo(vr.x+ropeTaps[1].x*vr.w,vr.y+ropeTaps[1].y*vr.h);
-      ctx.stroke();
-    }
-    return;
-  }
-
-  // Draw rope highlight lines (between tap points only, no extrapolation)
-  if(ropeLeft&&ropeRight){
-    // Use actual tap endpoints — no extrapolation prevents the X-crossing artifact
-    const lxT=ropeLeft.x1,lyT=ropeLeft.y1,lxB=ropeLeft.x2,lyB=ropeLeft.y2;
-    const rxT=ropeRight.x1,ryT=ropeRight.y1,rxB=ropeRight.x2,ryB=ropeRight.y2;
-
+  // Draw auto-detected rope lines
+  if(detectedRopes.length>0){
     ctx.save();
     ctx.beginPath();ctx.rect(vr.x,vr.y,vr.w,vr.h);ctx.clip();
 
-    // Gradient: subtle at top (far), brighter at bottom (near)
-    var lg=ctx.createLinearGradient(0,vr.y,0,vr.y+vr.h);
-    lg.addColorStop(0,'rgba(0,229,255,0.10)');
-    lg.addColorStop(1,'rgba(0,229,255,0.40)');
-
-    // Left rope (between actual tap points)
-    ctx.strokeStyle=lg;ctx.lineWidth=6;ctx.lineCap='round';
-    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y+lyT*vr.h);ctx.lineTo(vr.x+lxB*vr.w,vr.y+lyB*vr.h);ctx.stroke();
-    ctx.strokeStyle='rgba(0,229,255,0.8)';ctx.lineWidth=1.5;
-    ctx.beginPath();ctx.moveTo(vr.x+lxT*vr.w,vr.y+lyT*vr.h);ctx.lineTo(vr.x+lxB*vr.w,vr.y+lyB*vr.h);ctx.stroke();
-
-    // Right rope (between actual tap points)
-    ctx.strokeStyle=lg;ctx.lineWidth=6;
-    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y+ryT*vr.h);ctx.lineTo(vr.x+rxB*vr.w,vr.y+ryB*vr.h);ctx.stroke();
-    ctx.strokeStyle='rgba(0,229,255,0.8)';ctx.lineWidth=1.5;
-    ctx.beginPath();ctx.moveTo(vr.x+rxT*vr.w,vr.y+ryT*vr.h);ctx.lineTo(vr.x+rxB*vr.w,vr.y+ryB*vr.h);ctx.stroke();
+    detectedRopes.forEach(function(rope){
+      const py=vr.y+rope.yNorm*vr.h;
+      const alpha=0.15+rope.confidence*0.25;
+      // Thin dashed line for each detected rope
+      ctx.strokeStyle='rgba(0,229,255,'+alpha+')';
+      ctx.lineWidth=1;
+      ctx.setLineDash([6,4]);
+      ctx.beginPath();ctx.moveTo(vr.x,py);ctx.lineTo(vr.x+vr.w,py);ctx.stroke();
+      ctx.setLineDash([]);
+    });
 
     ctx.restore();
+  }
+
+  // Draw selected lane highlights
+  if(selectedLanes.length>0){
+    ctx.save();
+    ctx.beginPath();ctx.rect(vr.x,vr.y,vr.w,vr.h);ctx.clip();
+
+    const laneColors=['rgba(0,229,255,','rgba(255,213,79,','rgba(118,255,3,','rgba(255,128,171,'];
+    selectedLanes.forEach(function(lane,i){
+      const color=laneColors[i%laneColors.length];
+      const yTop=vr.y+lane.ropeAbove.yNorm*vr.h;
+      const yBot=vr.y+lane.ropeBelow.yNorm*vr.h;
+
+      // Fill lane band
+      ctx.fillStyle=color+'0.06)';
+      ctx.fillRect(vr.x,yTop,vr.w,yBot-yTop);
+
+      // Rope lines bounding the lane (solid, brighter)
+      ctx.strokeStyle=color+'0.6)';ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(vr.x,yTop);ctx.lineTo(vr.x+vr.w,yTop);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(vr.x,yBot);ctx.lineTo(vr.x+vr.w,yBot);ctx.stroke();
+
+      // Label
+      ctx.fillStyle=color+'0.8)';ctx.font='bold 10px IBM Plex Mono';ctx.textAlign='left';
+      ctx.fillText(lane.label,vr.x+8,yTop+12);
+
+      // Tap marker
+      const tapPx=vr.x+lane.tapX*vr.w, tapPy=vr.y+lane.tapY*vr.h;
+      ctx.strokeStyle=color+'0.9)';ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(tapPx,tapPy,8,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(tapPx-4,tapPy);ctx.lineTo(tapPx+4,tapPy);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(tapPx,tapPy-4);ctx.lineTo(tapPx,tapPy+4);ctx.stroke();
+    });
+
+    ctx.restore();
+  }
+
+  // Lane selection crosshair hint
+  if(selectingLane){
+    ctx.fillStyle='rgba(0,229,255,0.4)';ctx.font='12px IBM Plex Mono';ctx.textAlign='center';
+    ctx.fillText('↕ Tap on your swimmer ↕',vr.x+vr.w/2,vr.y+vr.h/2);
   }
 
   // Draw beep marker
@@ -1092,9 +1283,22 @@ async function startScan(){
   document.getElementById('scan-btn').textContent='Scanning...';
   document.getElementById('progress').style.width='0%';
   document.getElementById('results').style.display='none';
-  showStatus('Detecting beep/horn...','info');
+
+  // 0. AUTO-DETECT LANE ROPES (frame averaging)
+  if(!ropesDetected){
+    showStatus('Step 1: Detecting lane ropes via frame averaging...','info');
+    detectedRopes=await detectRopesFromVideo();
+    ropesDetected=true;
+    drawOverlay();
+    if(detectedRopes.length>=2){
+      showStatus('Found '+detectedRopes.length+' rope lines. Tap your swimmer after scan, or continue...','ok');
+    }else{
+      showStatus('Few ropes detected ('+detectedRopes.length+') — lane selection may be limited. Continuing scan...','warn');
+    }
+  }
 
   // 1. BEEP DETECTION
+  showStatus('Detecting beep/horn...','info');
   beepTime=await detectBeep();
   if(beepTime>0){
     showStatus('Beep detected at '+beepTime.toFixed(3)+'s. Scanning video...','ok');
@@ -1185,10 +1389,16 @@ async function startScan(){
   if(Math.abs(nWalls-expected)===1)conf='MEDIUM';
   if(Math.abs(nWalls-expected)>1)conf='LOW';
   const modeLabel=raceMode==='relay'?relayLegs+'×'+getRelayLegDist()+' relay':'individual';
-  showStatus('Scan complete ('+modeLabel+'): '+nWalls+' walls detected (expected '+expected+'), confidence: '+conf,'ok');
+  let statusMsg='Scan complete ('+modeLabel+'): '+nWalls+' walls (expected '+expected+'), conf: '+conf;
+  if(detectedRopes.length>=2 && selectedLanes.length===0){
+    statusMsg+='. Now tap your swimmer to select their lane!';
+  }
+  showStatus(statusMsg,'ok');
   console.log('Wall touches:',wallTouches);
+  console.log('Detected ropes:',detectedRopes);
   console.log('Camera pan log:',cameraPanLog);
   console.log('Beep:',beepTime,'Block depart:',blockDepartTime);
+  drawOverlay();
 }
 
 // ===== SPLIT TABLE =====
