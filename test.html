@@ -1051,10 +1051,31 @@ async function detectBeep(){
 
     // Filter: candidate should be within 1s before the peak (beep onset before peak)
     const valid=candidates.filter(function(c){return c.time>=peakTime-2.0&&c.time<=peakTime+0.5});
+
+    // Sanity check: a real starting beep should show a CLEAR contrast vs the audio before it
+    // If the audio is already loud from the start (crowd noise), and the "beep" is just a louder moment,
+    // reject it. A real beep has peak/baseline ratio > 3x typically.
+    const ratio=peak/baseline;
+    console.log('Beep peak/baseline ratio: '+ratio.toFixed(2));
+    if(ratio<2.5){
+      console.log('Beep rejected: peak/baseline ratio too low ('+ratio.toFixed(2)+'), likely just crowd noise variation');
+      return -1;
+    }
+
+    // Also reject if the "beep" is late (>3s) and the audio was already active from the start
+    // (swimmers already racing when recording began)
+    const earlyRms=rms.slice(0,Math.min(20,rms.length));
+    const earlyAvg=earlyRms.reduce(function(s,r){return s+r.rms},0)/earlyRms.length;
+    if(valid.length>0&&valid[0].time>3.0&&earlyAvg>baseline*1.3){
+      console.log('Beep rejected: candidate at '+valid[0].time.toFixed(2)+'s but audio active from start (earlyAvg='+earlyAvg.toFixed(5)+' vs baseline='+baseline.toFixed(5)+')');
+      return -1;
+    }
+
     if(valid.length>0) return valid[0].time;
 
-    // Fallback: earliest candidate
-    return candidates[0].time;
+    // Fallback: earliest candidate (only if in first 3 seconds)
+    if(candidates[0].time<=3.0) return candidates[0].time;
+    return -1;
 
   }catch(e){
     console.error('Beep detection error:',e);
@@ -1797,9 +1818,17 @@ async function startScan(){
   showStatus('Detecting beep/horn...','info');
   beepTime=await detectBeep();
   if(beepTime>0){
-    showStatus('Beep detected at '+beepTime.toFixed(3)+'s. Scanning video...','ok');
+    // Sanity check: if beep is more than 3s into the video and there's motion before it,
+    // swimmers were already racing — the "beep" is probably just loud crowd noise
+    if(beepTime>3.0&&motionLog&&motionLog.length>0){
+      // We haven't scanned yet so can't check motion, but 3s+ is suspicious
+      showStatus('Possible beep at '+beepTime.toFixed(3)+'s — verify this is the start horn, not crowd noise. Use 🔔 to correct.','warn');
+    } else {
+      showStatus('Beep detected at '+beepTime.toFixed(3)+'s. Scanning video...','ok');
+    }
   }else{
-    showStatus('No beep detected — you can set it manually. Scanning video...','warn');
+    beepTime=0; // Default to video start if no beep found
+    showStatus('No beep detected — using video start (0s) as reference. Use 🔔 SET BEEP to adjust.','warn');
   }
 
   // 2. SCAN VIDEO — collect camera pan, motion energy, edge composition per frame
