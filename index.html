@@ -12,7 +12,7 @@ body{background:#0a0a0c;color:#b0c0d0;font-family:'IBM Plex Mono','Menlo',monosp
 h1{font-size:28px;font-weight:800;color:#00e5ff;margin-bottom:6px}
 .sub{font-size:13px;color:#5a7a8a;margin-bottom:40px}
 .cards{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
-.card{flex:1;min-width:240px;max-width:280px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:28px 20px;text-decoration:none;color:inherit;transition:all .2s}
+.card{flex:1;min-width:200px;max-width:280px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:28px 20px;text-decoration:none;color:inherit;transition:all .2s}
 .card:hover{background:rgba(0,229,255,.05);border-color:rgba(0,229,255,.25);transform:translateY(-2px)}
 .card-icon{font-size:40px;margin-bottom:12px}
 .card-title{font-size:18px;font-weight:800;color:#e0e8f0;margin-bottom:8px}
@@ -54,10 +54,25 @@ ul li::before{content:"+ ";color:#3a5a6a}
           <li>Wall turn detection & lap splits</li>
           <li>Wall-to-wall speed calibration</li>
           <li>Stroke detection toggle</li>
-          <li>New Video reset</li>
         </ul>
       </div>
       <span class="card-tag tag-adv">FULL ANALYSIS</span>
+    </a>
+    <a class="card" href="test.html">
+      <div class="card-icon">🧪</div>
+      <div class="card-title">Test</div>
+      <div class="card-desc">
+        Rope-marking wall detection:
+        <ul>
+          <li>Lane rope float pattern tracking</li>
+          <li>Scroll velocity = swimmer speed</li>
+          <li>Direction reversal = wall touch</li>
+          <li>Beep & block departure detection</li>
+          <li>Frame-by-frame advance</li>
+          <li>Split table with official comparison</li>
+        </ul>
+      </div>
+      <span class="card-tag" style="background:rgba(255,183,77,.1);color:#ffb74d">EXPERIMENTAL</span>
     </a>
   </div>
 </div>
