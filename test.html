@@ -27,6 +27,12 @@ select.inp{-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.
 .toggle{display:flex;gap:2px;background:rgba(255,255,255,.03);border-radius:6px;padding:2px}
 .toggle button{padding:5px 10px;border:none;border-radius:4px;font-size:10px;font-weight:700;color:#5a7a8a;background:transparent}
 .toggle button.on{background:rgba(0,229,255,.15);color:#00e5ff}
+.toggle button.on-relay{background:rgba(255,183,77,.15);color:#ffb74d}
+.relay-row{display:none}
+.relay-row.show{display:flex}
+.leg-sep{border-top:2px solid rgba(255,183,77,.3) !important}
+.leg-label{color:#ffb74d;font-weight:700;font-size:10px;letter-spacing:1px}
+.exchange{color:#ff80ab}
 
 /* Video */
 .vid-wrap{position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#000;touch-action:none;margin-bottom:2px}
@@ -127,6 +133,26 @@ select.inp{-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.
         <span class="unit" id="event-info">100 Free · 4 laps · 100 yd</span>
       </div>
       <div class="setup-row">
+        <span class="lbl">Mode</span>
+        <div class="toggle" id="mode-toggle">
+          <button class="on" onclick="setMode('individual')">Individual</button>
+          <button onclick="setMode('relay')">Relay</button>
+        </div>
+      </div>
+      <div class="setup-row relay-row" id="relay-row">
+        <span class="lbl">Relay</span>
+        <div class="toggle" id="relay-toggle">
+          <button class="on-relay" onclick="setRelayLegs(4)">4×</button>
+          <button onclick="setRelayLegs(2)">2×</button>
+        </div>
+        <select class="inp" id="relay-leg-dist" onchange="updateEvent()" style="width:75px">
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+        <span class="unit" id="relay-info">4×50 · 8 laps · 200 yd</span>
+      </div>
+      <div class="setup-row">
         <span class="lbl">Official</span>
         <input type="text" class="inp" id="official-time" placeholder="ss.cc" style="width:90px">
         <span class="unit" style="color:#3a5a6a">← optional official time</span>
@@ -197,10 +223,42 @@ let speedIdx=4; // 1.0x
 // Course config
 const COURSES={SCY:{len:25,unit:'yd'},LCM:{len:50,unit:'m'},SCM:{len:25,unit:'m'}};
 let course='SCY';
+let raceMode='individual'; // 'individual' or 'relay'
+let relayLegs=4;
+
 function getLapLen(){return COURSES[course].len}
 function getLapUnit(){return COURSES[course].unit}
-function getNumLaps(){return Math.max(1,Math.round(parseInt(document.getElementById('event-dist').value)/getLapLen()))}
+
+function getRelayLegDist(){return parseInt(document.getElementById('relay-leg-dist').value)}
+function getLapsPerLeg(){return Math.max(1,Math.round(getRelayLegDist()/getLapLen()))}
+
+function getNumLaps(){
+  if(raceMode==='relay') return getLapsPerLeg()*relayLegs;
+  return Math.max(1,Math.round(parseInt(document.getElementById('event-dist').value)/getLapLen()));
+}
 function getTotalDist(){return getNumLaps()*getLapLen()}
+
+// For relays: expected wall events
+// Each leg has (lapsPerLeg) wall touches. The last wall of each leg is either an exchange or the finish.
+// Example: 4x50 SCY = 4 legs × 2 laps = 8 total wall touches
+function getExpectedWalls(){return getNumLaps()}
+
+// Classify a wall touch index for relay
+// Returns {type:'turn'|'exchange'|'finish', leg:1-based, lapInLeg:1-based}
+function classifyWall(wallIdx){
+  if(raceMode!=='relay'){
+    return{type:wallIdx===getNumLaps()-1?'finish':'turn',leg:1,lapInLeg:wallIdx+1};
+  }
+  const lpl=getLapsPerLeg();
+  const leg=Math.floor(wallIdx/lpl)+1; // 1-based leg number
+  const lapInLeg=(wallIdx%lpl)+1;      // 1-based lap within this leg
+  const isLastLapOfLeg=lapInLeg===lpl;
+  const isLastLeg=leg===relayLegs;
+  let type='turn';
+  if(isLastLapOfLeg&&isLastLeg) type='finish';
+  else if(isLastLapOfLeg) type='exchange';
+  return{type:type,leg:leg,lapInLeg:lapInLeg};
+}
 
 // Lane rope data (normalized 0-1 coords)
 let ropeTaps=[];   // [{x,y}, ...] — 4 tap points
@@ -295,11 +353,42 @@ function setCourse(c){
   updateEvent();
 }
 
+function setMode(m){
+  raceMode=m;
+  document.querySelectorAll('#mode-toggle button').forEach(function(b){
+    b.className=b.textContent.toLowerCase().indexOf(m)>=0?'on':'';
+  });
+  const relayRow=document.getElementById('relay-row');
+  if(m==='relay'){
+    relayRow.classList.add('show');
+  }else{
+    relayRow.classList.remove('show');
+  }
+  updateEvent();
+}
+
+function setRelayLegs(n){
+  relayLegs=n;
+  document.querySelectorAll('#relay-toggle button').forEach(function(b){
+    b.className=b.textContent.indexOf(n+'×')>=0?'on-relay':'';
+  });
+  updateEvent();
+}
+
 function updateEvent(){
-  const dist=parseInt(document.getElementById('event-dist').value);
-  const stroke=document.getElementById('event-stroke').value;
-  const laps=getNumLaps();
-  document.getElementById('event-info').textContent=dist+' '+stroke+' · '+laps+' laps · '+getTotalDist()+' '+getLapUnit();
+  if(raceMode==='relay'){
+    const legDist=getRelayLegDist();
+    const stroke=document.getElementById('event-stroke').value;
+    const laps=getNumLaps();
+    const lpl=getLapsPerLeg();
+    document.getElementById('relay-info').textContent=relayLegs+'×'+legDist+' · '+laps+' laps ('+lpl+'/leg) · '+getTotalDist()+' '+getLapUnit();
+    document.getElementById('event-info').textContent=relayLegs+'×'+legDist+' '+stroke+' relay · '+laps+' walls expected';
+  }else{
+    const dist=parseInt(document.getElementById('event-dist').value);
+    const stroke=document.getElementById('event-stroke').value;
+    const laps=getNumLaps();
+    document.getElementById('event-info').textContent=dist+' '+stroke+' · '+laps+' laps · '+getTotalDist()+' '+getLapUnit();
+  }
 }
 
 // ===== LANE ROPE TAPPING =====
@@ -946,11 +1035,12 @@ async function startScan(){
   drawGraph(motionLog,ropeColorLog);
 
   const nWalls=wallTouches.length;
-  const expected=getNumLaps();
+  const expected=getExpectedWalls();
   let conf='HIGH';
   if(Math.abs(nWalls-expected)===1)conf='MEDIUM';
   if(Math.abs(nWalls-expected)>1)conf='LOW';
-  showStatus('Scan complete: '+nWalls+' walls detected (expected '+expected+'), confidence: '+conf,'ok');
+  const modeLabel=raceMode==='relay'?relayLegs+'×'+getRelayLegDist()+' relay':'individual';
+  showStatus('Scan complete ('+modeLabel+'): '+nWalls+' walls detected (expected '+expected+'), confidence: '+conf,'ok');
   console.log('Wall touches:',wallTouches);
   console.log('Beep:',beepTime,'Block depart:',blockDepartTime);
 }
@@ -973,7 +1063,7 @@ function mergeWallDetections(ropeWalls,motionWalls){
   merged.sort(function(a,b){return a.time-b.time});
 
   // Filter to expected number of walls (take the most confident ones if too many)
-  const expected=getNumLaps();
+  const expected=getExpectedWalls();
   if(merged.length>expected){
     // Keep the ones with highest confidence
     merged.sort(function(a,b){return b.confidence-a.confidence});
@@ -991,27 +1081,93 @@ function rebuildSplits(){
   const startT=beepTime>0?beepTime:0;
   document.getElementById('results').style.display='block';
 
-  let html='<tr><th>#</th><th>WALL TIME</th><th>SPLIT</th><th>CUM</th><th>METHOD</th></tr>';
-  let prev=startT;
+  const isRelay=raceMode==='relay';
+  let html='<tr><th>#</th><th>WALL TIME</th><th>SPLIT</th><th>CUM</th>';
+  if(isRelay) html+='<th>LEG</th><th>LEG TIME</th>';
+  html+='<th>TYPE</th></tr>';
 
-  // Block departure (reaction time)
+  let prev=startT;
+  let legStartTimes=[startT]; // track start time of each leg
+
+  // Block departure (reaction time for first swimmer)
   if(blockDepartTime>0&&beepTime>0){
     const rt=blockDepartTime-beepTime;
     html+='<tr><td>RT</td><td class="time">'+blockDepartTime.toFixed(2)+'s</td>';
-    html+='<td class="split">'+rt.toFixed(2)+'s</td><td></td><td>reaction</td></tr>';
+    html+='<td class="split">'+rt.toFixed(2)+'s</td><td></td>';
+    if(isRelay) html+='<td></td><td></td>';
+    html+='<td>reaction</td></tr>';
   }
 
   wallTouches.forEach(function(w,i){
     const split=w.time-prev;
     const cum=w.time-startT;
-    const isFinish=i===wallTouches.length-1;
-    html+='<tr><td>'+(isFinish?'FIN':(i+1))+'</td>';
+    const info=classifyWall(i);
+
+    // Add leg separator row for relay exchanges
+    if(isRelay && i>0 && info.lapInLeg===1){
+      // This is the first wall of a new leg — the previous wall was an exchange
+      // Track the leg start time (the exchange time)
+      legStartTimes.push(wallTouches[i-1].time);
+    }
+
+    const legStart=legStartTimes[info.leg-1]||startT;
+    const legTime=w.time-legStart;
+
+    // Styling
+    let rowClass='';
+    if(isRelay && info.lapInLeg===1 && i>0) rowClass=' class="leg-sep"';
+
+    let label='';
+    if(info.type==='finish') label='FIN';
+    else if(info.type==='exchange') label='XCHG';
+    else label=''+(i+1);
+
+    let typeStr=info.type;
+    if(isRelay){
+      if(info.type==='exchange') typeStr='<span class="exchange">exchange → Sw'+(info.leg+1)+'</span>';
+      else if(info.type==='finish') typeStr='<span style="color:#76ff03;font-weight:700">FINISH</span>';
+      else typeStr='turn';
+    }else{
+      typeStr=w.method+(w.confidence?' ('+Math.round(w.confidence*100)+'%)':'');
+    }
+
+    html+='<tr'+rowClass+'>';
+    html+='<td>'+label+'</td>';
     html+='<td class="time">'+w.time.toFixed(2)+'s</td>';
     html+='<td class="split">'+split.toFixed(2)+'s</td>';
     html+='<td>'+cum.toFixed(2)+'s</td>';
-    html+='<td>'+w.method+(w.confidence?' ('+Math.round(w.confidence*100)+'%)':'')+'</td></tr>';
+    if(isRelay){
+      html+='<td class="leg-label">Sw'+info.leg+'</td>';
+      // Show leg cumulative time at exchange/finish
+      if(info.type==='exchange'||info.type==='finish'){
+        html+='<td class="time">'+legTime.toFixed(2)+'s</td>';
+      }else{
+        html+='<td>'+legTime.toFixed(2)+'</td>';
+      }
+    }
+    html+='<td>'+typeStr+'</td>';
+    html+='</tr>';
     prev=w.time;
   });
+
+  // Relay summary row
+  if(isRelay&&wallTouches.length>0){
+    html+='<tr><td colspan="'+(isRelay?7:5)+'" style="padding-top:10px;border-top:2px solid rgba(0,229,255,.2)">';
+    html+='<span style="color:#ffb74d;font-weight:700">LEG SPLITS: </span>';
+    for(let leg=1;leg<=relayLegs;leg++){
+      const lpl=getLapsPerLeg();
+      const legEndIdx=leg*lpl-1;
+      const legStartT=legStartTimes[leg-1]||startT;
+      if(legEndIdx<wallTouches.length){
+        const legEndT=wallTouches[legEndIdx].time;
+        const legSplit=legEndT-legStartT;
+        html+='<span style="color:#e0e8f0">Sw'+leg+': </span>';
+        html+='<span class="time">'+legSplit.toFixed(2)+'s</span>';
+        if(leg<relayLegs) html+=' · ';
+      }
+    }
+    html+='</td></tr>';
+  }
 
   // Compare with official time
   const officialInput=document.getElementById('official-time').value;
@@ -1026,7 +1182,8 @@ function rebuildSplits(){
     if(officialS>0){
       const measured=wallTouches[wallTouches.length-1].time-startT;
       const diff=measured-officialS;
-      html+='<tr><td colspan="5" style="padding-top:8px;color:'+(Math.abs(diff)<0.2?'#76ff03':'#ff5252')+'">';
+      const cols=isRelay?7:5;
+      html+='<tr><td colspan="'+cols+'" style="padding-top:8px;color:'+(Math.abs(diff)<0.2?'#76ff03':'#ff5252')+'">';
       html+='Official: '+officialS.toFixed(2)+'s · Measured: '+measured.toFixed(2)+'s · Diff: '+(diff>=0?'+':'')+diff.toFixed(2)+'s</td></tr>';
     }
   }
@@ -1089,11 +1246,14 @@ function drawGraph(motionLog,ropeLog){
   // Wall markers
   wallTouches.forEach(function(w,i){
     const wx=tx(w.time);
-    g.strokeStyle='#ff5252';g.lineWidth=1.5;g.setLineDash([3,2]);
+    const info=classifyWall(i);
+    const color=info.type==='exchange'?'#ff80ab':info.type==='finish'?'#76ff03':'#ff5252';
+    g.strokeStyle=color;g.lineWidth=info.type==='exchange'?2:1.5;g.setLineDash([3,2]);
     g.beginPath();g.moveTo(wx,pad.t);g.lineTo(wx,pad.t+gh);g.stroke();
     g.setLineDash([]);
-    g.fillStyle='#ff5252';g.font='bold 9px IBM Plex Mono';g.textAlign='center';
-    g.fillText('W'+(i+1),wx,pad.t+10);
+    g.fillStyle=color;g.font='bold 9px IBM Plex Mono';g.textAlign='center';
+    let lbl=info.type==='exchange'?'X'+info.leg:info.type==='finish'?'FIN':'W'+(i+1);
+    g.fillText(lbl,wx,pad.t+10);
   });
 
   // Y axis label
