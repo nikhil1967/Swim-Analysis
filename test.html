@@ -826,103 +826,251 @@ function computeRopeShift(prevColors,currColors){
   return bestShift/n;
 }
 
-// ===== WALL DETECTION from rope color patterns =====
-// When the swimmer approaches a wall, the visible portion of the rope
-// shifts rapidly as the camera pans. The KEY signal: the rope float
-// pattern scrolls in one direction during a lap, then reverses at each wall.
+// ===== WALL DETECTION — MULTI-SIGNAL APPROACH =====
+// Walls are PHYSICAL structures. We detect them via:
+// 1. Camera pan reversal (strongest signal — you turn your head at each wall)
+// 2. Scene composition change (wall/deck enters frame)
+// 3. Motion energy dip (swimmer decelerates → turns → glides)
 
-function detectWallsFromRopeScroll(ropeLog,sampleFps){
-  if(ropeLog.length<20)return[];
-  // Compute per-frame rope scroll velocity
-  const velocity=[];
-  for(let i=1;i<ropeLog.length;i++){
-    const dt=ropeLog[i].time-ropeLog[i-1].time;
-    if(dt<0.001)continue;
-    const shiftL=computeRopeShift(ropeLog[i-1].leftColors,ropeLog[i].leftColors);
-    const shiftR=computeRopeShift(ropeLog[i-1].rightColors,ropeLog[i].rightColors);
-    // Average both ropes
-    const avgShift=(shiftL+shiftR)/2;
-    velocity.push({time:ropeLog[i].time,v:avgShift/dt,shiftL:shiftL,shiftR:shiftR});
-  }
+// --- Signal 1: CAMERA PAN DETECTION ---
+// Compute global horizontal optical flow between consecutive frames.
+// Camera pans left-to-right following the swimmer, then reverses at walls.
 
-  if(velocity.length<10)return[];
+function computeCameraPan(prevData, currData, w, h){
+  // Compare horizontal strips across the frame to detect global horizontal shift.
+  // Sample 5 horizontal strips, compute cross-correlation shift for each, take median.
+  const stripH=Math.floor(h*0.08); // each strip ~8% of frame height
+  const stripPositions=[0.15,0.30,0.50,0.70,0.85]; // sample at different heights
+  const shifts=[];
 
-  // Smooth velocity
-  const smoothV=[];
-  const hw=2; // half-window
-  for(let i=0;i<velocity.length;i++){
-    let sum=0,cnt=0;
-    for(let j=Math.max(0,i-hw);j<=Math.min(velocity.length-1,i+hw);j++){
-      sum+=velocity[j].v;cnt++;
+  for(let si=0;si<stripPositions.length;si++){
+    const yCenter=Math.floor(h*stripPositions[si]);
+    const yStart=Math.max(0,yCenter-Math.floor(stripH/2));
+
+    // Build luminance row averages for this strip
+    const prevRow=new Float32Array(w);
+    const currRow=new Float32Array(w);
+    for(let x=0;x<w;x++){
+      let pSum=0,cSum=0,cnt=0;
+      for(let y=yStart;y<Math.min(yStart+stripH,h);y++){
+        const idx=(y*w+x)*4;
+        pSum+=prevData[idx]*0.299+prevData[idx+1]*0.587+prevData[idx+2]*0.114;
+        cSum+=currData[idx]*0.299+currData[idx+1]*0.587+currData[idx+2]*0.114;
+        cnt++;
+      }
+      prevRow[x]=pSum/cnt;
+      currRow[x]=cSum/cnt;
     }
-    smoothV.push({time:velocity[i].time,v:sum/cnt});
+
+    // Cross-correlate to find horizontal shift (-maxShift to +maxShift pixels)
+    const maxShift=Math.min(60,Math.floor(w*0.15));
+    let bestShift=0,bestSAD=Infinity;
+    for(let shift=-maxShift;shift<=maxShift;shift++){
+      let sad=0,cnt=0;
+      for(let x=maxShift;x<w-maxShift;x++){
+        const x2=x+shift;
+        if(x2>=0&&x2<w){
+          sad+=Math.abs(prevRow[x]-currRow[x2]);
+          cnt++;
+        }
+      }
+      if(cnt>0)sad/=cnt;
+      if(sad<bestSAD){bestSAD=sad;bestShift=shift}
+    }
+    shifts.push(bestShift);
   }
 
-  // Detect zero crossings of velocity (direction reversals = wall touches)
-  const walls=[];
-  const minGap=getLapLen()===50?15:5; // minimum seconds between walls
+  // Median shift (robust to one strip being occluded)
+  shifts.sort(function(a,b){return a-b});
+  return shifts[Math.floor(shifts.length/2)];
+}
+
+// --- Signal 2: SCENE COMPOSITION CHANGE ---
+// When swimmer reaches a wall, the pool wall/deck/blocks enter the frame.
+// Detect by measuring how much the frame edges change vs middle.
+
+function computeEdgeChange(prevData,currData,w,h){
+  // Compare left 15% and right 15% of frame vs center
+  // Big edge changes = new content entering frame = near a wall
+  const edgeW=Math.floor(w*0.15);
+  let leftChange=0,rightChange=0,centerChange=0;
+  let lCnt=0,rCnt=0,cCnt=0;
+  const step=8; // sample every 8 pixels
+  for(let y=0;y<h;y+=step){
+    for(let x=0;x<edgeW;x+=step){
+      const idx=(y*w+x)*4;
+      leftChange+=Math.abs(currData[idx]-prevData[idx])+Math.abs(currData[idx+1]-prevData[idx+1]);
+      lCnt++;
+    }
+    for(let x=w-edgeW;x<w;x+=step){
+      const idx=(y*w+x)*4;
+      rightChange+=Math.abs(currData[idx]-prevData[idx])+Math.abs(currData[idx+1]-prevData[idx+1]);
+      rCnt++;
+    }
+    for(let x=edgeW;x<w-edgeW;x+=step){
+      const idx=(y*w+x)*4;
+      centerChange+=Math.abs(currData[idx]-prevData[idx])+Math.abs(currData[idx+1]-prevData[idx+1]);
+      cCnt++;
+    }
+  }
+  if(lCnt)leftChange/=lCnt;
+  if(rCnt)rightChange/=rCnt;
+  if(cCnt)centerChange/=cCnt;
+  return{left:leftChange,right:rightChange,center:centerChange,
+         edgeRatio:Math.max(leftChange,rightChange)/(centerChange+0.01)};
+}
+
+// --- Signal 3: MOTION ENERGY ---
+function computeMotionEnergy(prevData,currData,w,h){
+  let energy=0,cnt=0;
+  for(let p=0;p<prevData.length;p+=16){
+    energy+=Math.abs(currData[p]-prevData[p])+Math.abs(currData[p+1]-prevData[p+1])+Math.abs(currData[p+2]-prevData[p+2]);
+    cnt++;
+  }
+  return cnt>0?energy/cnt:0;
+}
+
+// --- WALL DETECTION: Combine all signals ---
+function detectWalls(cameraPanLog, motionLog, edgeLog){
+  const minGap=getLapLen()===50?15:5; // min seconds between walls
+
+  // === PRIMARY: Camera pan reversals ===
+  // Smooth the camera pan signal
+  const smoothPan=[];
+  const hw=3;
+  for(let i=0;i<cameraPanLog.length;i++){
+    let sum=0,cnt=0;
+    for(let j=Math.max(0,i-hw);j<=Math.min(cameraPanLog.length-1,i+hw);j++){
+      sum+=cameraPanLog[j].pan;cnt++;
+    }
+    smoothPan.push({time:cameraPanLog[i].time,pan:sum/cnt});
+  }
+
+  // Accumulate pan into position (cumulative sum)
+  const camPos=[];
+  let cumPan=0;
+  for(let i=0;i<smoothPan.length;i++){
+    cumPan+=smoothPan[i].pan;
+    camPos.push({time:smoothPan[i].time,pos:cumPan,pan:smoothPan[i].pan});
+  }
+
+  // Find pan direction reversals (velocity of camera position changes sign)
+  // The camera pan itself IS the velocity. We want where it crosses zero with conviction.
+  const panWalls=[];
   let lastWallTime=-minGap*2;
 
-  for(let i=1;i<smoothV.length;i++){
-    if(smoothV[i-1].v*smoothV[i].v<0){ // sign change
-      const t=smoothV[i].time;
+  // Look for sign changes in smoothed pan
+  for(let i=1;i<smoothPan.length;i++){
+    const prev=smoothPan[i-1].pan, curr=smoothPan[i].pan;
+    if(prev*curr<0 && (Math.abs(prev)>0.3||Math.abs(curr)>0.3)){ // sign change with real magnitude
+      const t=smoothPan[i].time;
       if(t-lastWallTime>=minGap){
-        // Verify it's a real reversal (not just noise)
-        // Check that velocity is sustained in opposite direction afterward
-        let sustained=0;
-        for(let j=i;j<Math.min(i+5,smoothV.length);j++){
-          if(Math.abs(smoothV[j].v)>0.001)sustained++;
+        // Confirm: check that pan was sustained before and after
+        let beforeSustained=0,afterSustained=0;
+        for(let j=Math.max(0,i-5);j<i;j++){
+          if(Math.abs(smoothPan[j].pan)>0.2)beforeSustained++;
         }
-        if(sustained>=2){
-          walls.push({time:t,confidence:Math.min(1,Math.abs(smoothV[i].v)*10),method:'rope-scroll'});
+        for(let j=i;j<Math.min(smoothPan.length,i+5);j++){
+          if(Math.abs(smoothPan[j].pan)>0.2)afterSustained++;
+        }
+        if(beforeSustained>=2&&afterSustained>=1){
+          // Calculate confidence from how sharp the reversal is
+          const magnitude=Math.abs(prev)+Math.abs(curr);
+          const conf=Math.min(1.0,magnitude/5);
+          panWalls.push({time:t,confidence:conf,method:'camera-pan'});
           lastWallTime=t;
         }
       }
     }
   }
 
-  return walls;
-}
-
-// ===== MOTION ENERGY WALL DETECTION (backup) =====
-// Detects walls from swimming→still→swimming transitions
-function detectWallsFromMotion(motionLog,sampleFps){
-  if(motionLog.length<20)return[];
-  // Smooth
+  // === SECONDARY: Motion energy dips ===
   const smoothE=[];
-  const hw=3;
   for(let i=0;i<motionLog.length;i++){
     let sum=0,cnt=0;
-    for(let j=Math.max(0,i-hw);j<=Math.min(motionLog.length-1,i+hw);j++){
+    for(let j=Math.max(0,i-3);j<=Math.min(motionLog.length-1,i+3);j++){
       sum+=motionLog[j].energy;cnt++;
     }
     smoothE.push({time:motionLog[i].time,e:sum/cnt});
   }
-
-  // Find the median energy level
   const sorted=smoothE.map(function(s){return s.e}).sort(function(a,b){return a-b});
   const median=sorted[Math.floor(sorted.length/2)];
-  const threshold=median*0.4; // below 40% of median = underwater/wall phase
+  const dipThresh=median*0.35;
 
-  // Find dips below threshold
-  const walls=[];
-  const minGap=getLapLen()===50?15:5;
+  const motionWalls=[];
   let inDip=false,dipStart=-1;
-  let lastWallTime=-minGap*2;
-
+  lastWallTime=-minGap*2;
   for(let i=0;i<smoothE.length;i++){
-    if(smoothE[i].e<threshold&&!inDip){
+    if(smoothE[i].e<dipThresh&&!inDip){
       inDip=true;dipStart=i;
-    }else if(smoothE[i].e>=threshold&&inDip){
+    }else if((smoothE[i].e>=dipThresh||i===smoothE.length-1)&&inDip){
       inDip=false;
-      const dipMid=smoothE[Math.floor((dipStart+i)/2)].time;
-      if(dipMid-lastWallTime>=minGap){
-        walls.push({time:smoothE[dipStart].time,confidence:0.5,method:'motion-dip'});
-        lastWallTime=smoothE[dipStart].time;
+      const dipT=smoothE[dipStart].time;
+      if(dipT-lastWallTime>=minGap){
+        motionWalls.push({time:dipT,confidence:0.4,method:'motion-dip'});
+        lastWallTime=dipT;
       }
     }
   }
-  return walls;
+
+  // === TERTIARY: Scene composition spikes ===
+  const sceneWalls=[];
+  if(edgeLog.length>10){
+    const edgeRatios=edgeLog.map(function(e){return e.edgeRatio});
+    const edgeSorted=[...edgeRatios].sort(function(a,b){return a-b});
+    const edgeP75=edgeSorted[Math.floor(edgeSorted.length*0.75)];
+    const edgeThresh=edgeP75*1.5;
+    lastWallTime=-minGap*2;
+    for(let i=0;i<edgeLog.length;i++){
+      if(edgeLog[i].edgeRatio>edgeThresh && edgeLog[i].time-lastWallTime>=minGap){
+        sceneWalls.push({time:edgeLog[i].time,confidence:0.3,method:'scene-change'});
+        lastWallTime=edgeLog[i].time;
+      }
+    }
+  }
+
+  // === MERGE: camera pan is primary, others confirm or fill gaps ===
+  const merged=[...panWalls];
+
+  // Boost confidence of pan walls that have motion-dip confirmation nearby
+  merged.forEach(function(pw){
+    for(let i=0;i<motionWalls.length;i++){
+      if(Math.abs(motionWalls[i].time-pw.time)<2.0){
+        pw.confidence=Math.min(1.0,pw.confidence+0.2);
+        pw.method='camera-pan+motion';
+        break;
+      }
+    }
+    for(let i=0;i<sceneWalls.length;i++){
+      if(Math.abs(sceneWalls[i].time-pw.time)<2.0){
+        pw.confidence=Math.min(1.0,pw.confidence+0.1);
+        if(pw.method.indexOf('scene')<0) pw.method+='+scene';
+        break;
+      }
+    }
+  });
+
+  // Add motion walls that don't overlap pan walls (fill gaps)
+  motionWalls.forEach(function(mw){
+    let overlaps=false;
+    for(let i=0;i<merged.length;i++){
+      if(Math.abs(merged[i].time-mw.time)<3.0){overlaps=true;break}
+    }
+    if(!overlaps)merged.push(mw);
+  });
+
+  // Sort by time
+  merged.sort(function(a,b){return a.time-b.time});
+
+  // Trim to expected wall count if too many
+  const expected=getExpectedWalls();
+  if(merged.length>expected){
+    merged.sort(function(a,b){return b.confidence-a.confidence});
+    merged.length=expected;
+    merged.sort(function(a,b){return a.time-b.time});
+  }
+
+  return merged;
 }
 
 // ===== BLOCK DEPARTURE DETECTION =====
@@ -943,10 +1091,6 @@ function detectBlockDeparture(motionLog,beepT,sampleFps){
 // ===== MAIN SCAN =====
 async function startScan(){
   if(!V||!videoReady||scanning)return;
-  if(!ropeLeft||!ropeRight){
-    showStatus('Please tap lane ropes first (4 points: near+far on each rope)','warn');
-    return;
-  }
 
   scanning=true;scanned=false;
   wallTouches=[];ropeColorLog=[];beepTime=-1;blockDepartTime=-1;
@@ -963,21 +1107,24 @@ async function startScan(){
     showStatus('No beep detected — you can set it manually. Scanning video...','warn');
   }
 
-  // 2. SCAN VIDEO — sample rope colors + motion energy at each frame
+  // 2. SCAN VIDEO — collect camera pan, motion energy, edge composition per frame
   const sC=document.getElementById('scan-canvas');
   const sx=sC.getContext('2d');
-  const fps=10; // 10fps for rope color sampling (enough for pattern tracking)
+  const fps=10;
   const frameInterval=1/fps;
   const duration=V.duration;
   const totalFrames=Math.floor(duration*fps);
-  const ROPE_SAMPLES=40; // sample 40 points along each rope per frame
 
   // Scale scan canvas
   const scanW=480, scanH=Math.round(480*V.videoHeight/V.videoWidth);
   sC.width=scanW;sC.height=scanH;
 
+  const cameraPanLog=[];
   const motionLog=[];
-  let prevImageData=null;
+  const edgeLog=[];
+  let prevData=null;
+
+  showStatus('Pass 1/1: Scanning video for camera pan, motion & scene changes...','info');
 
   for(let i=0;i<totalFrames;i++){
     const t=i*frameInterval;
@@ -986,24 +1133,31 @@ async function startScan(){
 
     sx.drawImage(V,0,0,scanW,scanH);
     const imageData=sx.getImageData(0,0,scanW,scanH);
+    const currData=imageData.data;
 
-    // Sample rope colors
-    const leftColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeLeft,ROPE_SAMPLES);
-    const rightColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeRight,ROPE_SAMPLES);
-    ropeColorLog.push({time:t,leftColors:leftColors,rightColors:rightColors});
+    if(prevData){
+      // Camera pan (global horizontal shift)
+      const pan=computeCameraPan(prevData,currData,scanW,scanH);
+      cameraPanLog.push({time:t,pan:pan});
 
-    // Motion energy (simple frame diff in the lane region)
-    if(prevImageData){
-      let energy=0,cnt=0;
-      const d1=prevImageData.data, d2=imageData.data;
-      // Sample every 4th pixel for speed
-      for(let p=0;p<d1.length;p+=16){
-        energy+=Math.abs(d2[p]-d1[p])+Math.abs(d2[p+1]-d1[p+1])+Math.abs(d2[p+2]-d1[p+2]);
-        cnt++;
+      // Motion energy
+      const energy=computeMotionEnergy(prevData,currData,scanW,scanH);
+      motionLog.push({time:t,energy:energy});
+
+      // Scene edge composition
+      const edge=computeEdgeChange(prevData,currData,scanW,scanH);
+      edge.time=t;
+      edgeLog.push(edge);
+
+      // Also sample rope colors if ropes are set (supplementary data)
+      if(ropeLeft&&ropeRight){
+        const ROPE_SAMPLES=40;
+        const leftColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeLeft,ROPE_SAMPLES);
+        const rightColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeRight,ROPE_SAMPLES);
+        ropeColorLog.push({time:t,leftColors:leftColors,rightColors:rightColors});
       }
-      motionLog.push({time:t,energy:cnt>0?energy/cnt:0});
     }
-    prevImageData=new ImageData(new Uint8ClampedArray(imageData.data),scanW,scanH);
+    prevData=new Uint8ClampedArray(currData);
 
     // Progress
     const pct=Math.round(i/totalFrames*100);
@@ -1013,13 +1167,9 @@ async function startScan(){
     if(i%5===0)await new Promise(function(r){setTimeout(r,0)});
   }
 
-  // 3. DETECT WALLS from rope scroll pattern
-  showStatus('Analyzing rope patterns for wall detection...','info');
-  const ropeWalls=detectWallsFromRopeScroll(ropeColorLog,fps);
-  const motionWalls=detectWallsFromMotion(motionLog,fps);
-
-  // Merge: prefer rope-based, supplement with motion-based
-  wallTouches=mergeWallDetections(ropeWalls,motionWalls);
+  // 3. DETECT WALLS using multi-signal approach
+  showStatus('Analyzing camera pan reversals & motion for wall detection...','info');
+  wallTouches=detectWalls(cameraPanLog, motionLog, edgeLog);
 
   // 4. DETECT BLOCK DEPARTURE
   if(beepTime>0){
@@ -1032,7 +1182,7 @@ async function startScan(){
   document.getElementById('progress').style.width='100%';
 
   rebuildSplits();
-  drawGraph(motionLog,ropeColorLog);
+  drawGraph(motionLog,cameraPanLog);
 
   const nWalls=wallTouches.length;
   const expected=getExpectedWalls();
@@ -1042,36 +1192,8 @@ async function startScan(){
   const modeLabel=raceMode==='relay'?relayLegs+'×'+getRelayLegDist()+' relay':'individual';
   showStatus('Scan complete ('+modeLabel+'): '+nWalls+' walls detected (expected '+expected+'), confidence: '+conf,'ok');
   console.log('Wall touches:',wallTouches);
+  console.log('Camera pan log:',cameraPanLog);
   console.log('Beep:',beepTime,'Block depart:',blockDepartTime);
-}
-
-// Merge rope-scroll and motion wall detections
-function mergeWallDetections(ropeWalls,motionWalls){
-  // Start with rope-based walls (higher confidence)
-  const merged=[...ropeWalls];
-
-  // Add motion walls that don't overlap with any rope wall (within 2s)
-  motionWalls.forEach(function(mw){
-    let overlaps=false;
-    for(let i=0;i<merged.length;i++){
-      if(Math.abs(merged[i].time-mw.time)<2.0){overlaps=true;break}
-    }
-    if(!overlaps)merged.push(mw);
-  });
-
-  // Sort by time
-  merged.sort(function(a,b){return a.time-b.time});
-
-  // Filter to expected number of walls (take the most confident ones if too many)
-  const expected=getExpectedWalls();
-  if(merged.length>expected){
-    // Keep the ones with highest confidence
-    merged.sort(function(a,b){return b.confidence-a.confidence});
-    merged.length=expected;
-    merged.sort(function(a,b){return a.time-b.time});
-  }
-
-  return merged;
 }
 
 // ===== SPLIT TABLE =====
@@ -1192,7 +1314,7 @@ function rebuildSplits(){
 }
 
 // ===== GRAPH =====
-function drawGraph(motionLog,ropeLog){
+function drawGraph(motionLog,cameraPanLog){
   const canvas=document.getElementById('graph');
   const rect=canvas.parentElement.getBoundingClientRect();
   const dpr=window.devicePixelRatio||1;
@@ -1224,7 +1346,7 @@ function drawGraph(motionLog,ropeLog){
     g.fillText(t+'s',x,H-4);
   }
 
-  // Motion energy line
+  // Motion energy line (cyan, lower half)
   g.strokeStyle='rgba(0,229,255,0.5)';g.lineWidth=1.5;
   g.beginPath();
   motionLog.forEach(function(m,i){
@@ -1232,6 +1354,26 @@ function drawGraph(motionLog,ropeLog){
     if(i===0)g.moveTo(x,y);else g.lineTo(x,y);
   });
   g.stroke();
+
+  // Camera pan line (yellow, centered at midline — positive=right, negative=left)
+  if(cameraPanLog&&cameraPanLog.length>2){
+    const panMax=Math.max(...cameraPanLog.map(function(p){return Math.abs(p.pan)}))*1.1||1;
+    const midY=pad.t+gh/2;
+    function pyPan(p){return midY-p/panMax*(gh*0.4)} // scale to ±40% of graph height
+
+    // Zero line
+    g.strokeStyle='rgba(255,213,79,0.15)';g.lineWidth=1;
+    g.beginPath();g.moveTo(pad.l,midY);g.lineTo(pad.l+gw,midY);g.stroke();
+
+    // Pan signal
+    g.strokeStyle='rgba(255,213,79,0.6)';g.lineWidth=1.5;
+    g.beginPath();
+    cameraPanLog.forEach(function(p,i){
+      const x=tx(p.time),y=pyPan(p.pan);
+      if(i===0)g.moveTo(x,y);else g.lineTo(x,y);
+    });
+    g.stroke();
+  }
 
   // Beep marker
   if(beepTime>0){
@@ -1254,12 +1396,20 @@ function drawGraph(motionLog,ropeLog){
     g.fillStyle=color;g.font='bold 9px IBM Plex Mono';g.textAlign='center';
     let lbl=info.type==='exchange'?'X'+info.leg:info.type==='finish'?'FIN':'W'+(i+1);
     g.fillText(lbl,wx,pad.t+10);
+    // Show method label
+    g.fillStyle='rgba(255,255,255,0.3)';g.font='7px IBM Plex Mono';
+    g.fillText(w.method,wx,pad.t+20);
   });
+
+  // Legend
+  g.font='9px IBM Plex Mono';g.textAlign='right';
+  g.fillStyle='rgba(0,229,255,0.6)';g.fillText('— Motion',W-12,pad.t+10);
+  g.fillStyle='rgba(255,213,79,0.6)';g.fillText('— Camera Pan',W-12,pad.t+22);
 
   // Y axis label
   g.save();g.translate(10,pad.t+gh/2);g.rotate(-Math.PI/2);
   g.fillStyle='#3a5a6a';g.font='9px IBM Plex Mono';g.textAlign='center';
-  g.fillText('Motion',0,0);
+  g.fillText('Motion / Pan',0,0);
   g.restore();
 }
 
