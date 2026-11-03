@@ -951,17 +951,29 @@ async function detectBeep(){
 
     if(rms.length<10)return -1;
 
-    // IMPROVED BASELINE: use quietest 500ms window in first 3 seconds
-    // This handles cases where beep is at start or crowd noise varies
+    // Check if audio is active from the very start (first 200ms)
+    // If significant energy from frame 0, the recording likely started mid-event — no beep captured
+    const first200ms=Math.ceil(0.2/0.01); // 20 frames
+    let earlyEnergy=0;
+    for(let i=0;i<Math.min(first200ms,rms.length);i++) earlyEnergy+=rms[i].rms;
+    earlyEnergy/=Math.min(first200ms,rms.length);
+
+    // Overall average energy in first 5 seconds
+    const first5s=Math.min(Math.ceil(5.0/0.01),rms.length);
+    let avgEnergy5s=0;
+    for(let i=0;i<first5s;i++) avgEnergy5s+=rms[i].rms;
+    avgEnergy5s/=first5s;
+
+    // IMPROVED BASELINE: use quietest 500ms window in first 5 seconds
     const winFrames=Math.ceil(0.5/0.01); // 500ms in 10ms hops = 50 frames
-    const maxBaseT=3.0;
-    let bestBaseline=Infinity, bestBaseIdx=0;
+    const maxBaseT=5.0;
+    let bestBaseline=Infinity;
     for(let start=0;start<rms.length-winFrames;start++){
       if(rms[start].time>maxBaseT) break;
       let sum=0;
       for(let j=start;j<start+winFrames&&j<rms.length;j++) sum+=rms[j].rms;
       const avg=sum/winFrames;
-      if(avg<bestBaseline){bestBaseline=avg;bestBaseIdx=start}
+      if(avg<bestBaseline) bestBaseline=avg;
     }
     const baseline=bestBaseline;
 
@@ -971,111 +983,76 @@ async function detectBeep(){
       if(rms[i].rms>peak){peak=rms[i].rms;peakIdx=i}
     }
 
-    console.log('Beep detection: baseline='+baseline.toFixed(5)+' peak='+peak.toFixed(5)+' peakTime='+rms[peakIdx].time.toFixed(3));
-
-    // Need a significant peak — at least 2x baseline
-    if(peak<baseline*1.8)return -1;
-
-    // STRATEGY 1: Sharpest sustained energy jump (most reliable for beep/horn)
-    // Look for the biggest upward jump that stays high
-    let bestJumpIdx=-1, bestJumpScore=0;
-    for(let i=3;i<rms.length-5;i++){
-      // Compare 3-frame average before vs 5-frame average after
-      const bef=(rms[i-3].rms+rms[i-2].rms+rms[i-1].rms)/3;
-      const aft=(rms[i].rms+rms[i+1].rms+rms[i+2].rms+rms[i+3].rms+rms[i+4].rms)/5;
-      const jump=aft-bef;
-      // Score: jump magnitude × sustained ratio (how much stays above the jump midpoint)
-      if(jump>baseline*0.3){
-        let sustained=0;
-        const mid=bef+jump*0.4;
-        for(let j=i;j<Math.min(i+15,rms.length);j++){
-          if(rms[j].rms>mid)sustained++;
-        }
-        const score=jump*sustained;
-        if(score>bestJumpScore){bestJumpScore=score;bestJumpIdx=i}
-      }
-    }
-
-    // STRATEGY 2: Threshold crossing (fixed baseline)
-    let thresh=Math.max(baseline*2.0, baseline+(peak-baseline)*0.25);
-    let firstCross=-1;
-    let run=0;
-    for(let i=0;i<rms.length;i++){
-      if(rms[i].rms>thresh){
-        run++;
-        if(run>=2&&firstCross<0) firstCross=i-1;
-      }else{run=0}
-    }
-
-    // STRATEGY 3: High-frequency energy spike (beep/horn is usually >500Hz)
-    // Compute spectral energy in 500-4000Hz band using simple bandpass
-    let hfBeepTime=-1;
-    try{
-      const hfWin=Math.floor(sr*0.05); // 50ms window
-      const hfHop=Math.floor(sr*0.025);
-      const hfRms=[];
-      // Simple high-pass: difference of adjacent samples approximates derivative
-      for(let s=0;s+hfWin<=raw.length&&s/sr<=searchDur;s+=hfHop){
-        let sq=0;
-        for(let i=s+1;i<s+hfWin;i++){
-          const hp=raw[i]-raw[i-1]; // high-pass filter
-          sq+=hp*hp;
-        }
-        hfRms.push({time:s/sr,rms:Math.sqrt(sq/(hfWin-1))});
-      }
-      // Find biggest jump in HF energy
-      let bestHfJ=-1,bestHfS=0;
-      for(let i=2;i<hfRms.length-3;i++){
-        const bef=(hfRms[i-2].rms+hfRms[i-1].rms)/2;
-        const aft=(hfRms[i].rms+hfRms[i+1].rms+hfRms[i+2].rms)/3;
-        const j=aft-bef;
-        if(j>bestHfS){bestHfS=j;bestHfJ=i}
-      }
-      if(bestHfJ>=0&&bestHfS>0.001) hfBeepTime=hfRms[bestHfJ].time;
-    }catch(e){}
-
-    // Combine strategies — pick the earliest reasonable detection
-    const candidates=[];
-    if(bestJumpIdx>=0) candidates.push({time:rms[bestJumpIdx].time,method:'jump',score:bestJumpScore});
-    if(firstCross>=0) candidates.push({time:rms[firstCross].time,method:'threshold',score:peak-baseline});
-    if(hfBeepTime>=0) candidates.push({time:hfBeepTime,method:'hf-energy',score:0.5});
-
-    console.log('Beep candidates:',candidates);
-
-    if(candidates.length===0)return -1;
-
-    // If multiple candidates agree (within 0.5s), high confidence
-    // Pick the earliest candidate that's within 1s of the peak
-    candidates.sort(function(a,b){return a.time-b.time});
-    const peakTime=rms[peakIdx].time;
-
-    // Filter: candidate should be within 1s before the peak (beep onset before peak)
-    const valid=candidates.filter(function(c){return c.time>=peakTime-2.0&&c.time<=peakTime+0.5});
-
-    // Sanity check: a real starting beep should show a CLEAR contrast vs the audio before it
-    // If the audio is already loud from the start (crowd noise), and the "beep" is just a louder moment,
-    // reject it. A real beep has peak/baseline ratio > 3x typically.
     const ratio=peak/baseline;
-    console.log('Beep peak/baseline ratio: '+ratio.toFixed(2));
-    if(ratio<2.5){
-      console.log('Beep rejected: peak/baseline ratio too low ('+ratio.toFixed(2)+'), likely just crowd noise variation');
+    console.log('Beep detection: baseline='+baseline.toFixed(5)+' peak='+peak.toFixed(5)+
+      ' peakTime='+rms[peakIdx].time.toFixed(3)+' ratio='+ratio.toFixed(2)+
+      ' earlyEnergy='+earlyEnergy.toFixed(5)+' avgEnergy5s='+avgEnergy5s.toFixed(5));
+
+    // KEY CHECK: If audio is already active from the very start (early energy is substantial
+    // relative to the average), then this recording has no silence before a beep.
+    // A real beep recording has: silence → BEEP → crowd noise. If early energy ≥ 40% of average,
+    // there's no clear silence period, so no beep was captured.
+    if(earlyEnergy>0.001 && earlyEnergy>=avgEnergy5s*0.4){
+      console.log('Beep rejected: audio active from start (earlyEnergy='+earlyEnergy.toFixed(5)+
+        ' is '+((earlyEnergy/avgEnergy5s)*100).toFixed(0)+'% of avg). No silence-to-beep transition.');
       return -1;
     }
 
-    // Also reject if the "beep" is late (>3s) and the audio was already active from the start
-    // (swimmers already racing when recording began)
-    const earlyRms=rms.slice(0,Math.min(20,rms.length));
-    const earlyAvg=earlyRms.reduce(function(s,r){return s+r.rms},0)/earlyRms.length;
-    if(valid.length>0&&valid[0].time>3.0&&earlyAvg>baseline*1.3){
-      console.log('Beep rejected: candidate at '+valid[0].time.toFixed(2)+'s but audio active from start (earlyAvg='+earlyAvg.toFixed(5)+' vs baseline='+baseline.toFixed(5)+')');
+    // Need a very clear peak — at least 3x the quietest baseline
+    if(ratio<3.0){
+      console.log('Beep rejected: peak/baseline ratio too low ('+ratio.toFixed(2)+'), need ≥3.0');
       return -1;
     }
 
-    if(valid.length>0) return valid[0].time;
+    // Look for a sharp onset: find where energy first crosses 50% of peak level
+    // and stays there. A real beep has a sudden onset, not a gradual ramp.
+    const onsetThresh=baseline+(peak-baseline)*0.3;
+    let onsetIdx=-1;
+    for(let i=0;i<rms.length;i++){
+      if(rms[i].rms>onsetThresh){
+        // Verify it stays above for at least 50ms (5 frames)
+        let stays=true;
+        for(let j=i;j<Math.min(i+5,rms.length);j++){
+          if(rms[j].rms<onsetThresh*0.7){stays=false;break}
+        }
+        if(stays){onsetIdx=i;break}
+      }
+    }
 
-    // Fallback: earliest candidate (only if in first 3 seconds)
-    if(candidates[0].time<=3.0) return candidates[0].time;
-    return -1;
+    if(onsetIdx<0){
+      console.log('Beep rejected: no clear onset found');
+      return -1;
+    }
+
+    // Check that there's genuine silence before the onset (at least 200ms of quiet)
+    const silenceCheck=Math.max(0,onsetIdx-20); // 200ms before onset
+    let preOnsetAvg=0;
+    let preCount=0;
+    for(let i=silenceCheck;i<onsetIdx;i++){
+      preOnsetAvg+=rms[i].rms;preCount++;
+    }
+    if(preCount>0) preOnsetAvg/=preCount;
+
+    // The pre-onset should be clearly quieter than the onset
+    const preOnsetRatio=rms[onsetIdx].rms/(preOnsetAvg||0.00001);
+    console.log('Beep onset at '+rms[onsetIdx].time.toFixed(3)+'s, preOnsetAvg='+preOnsetAvg.toFixed(5)+
+      ', onsetRms='+rms[onsetIdx].rms.toFixed(5)+', preOnsetRatio='+preOnsetRatio.toFixed(2));
+
+    if(preOnsetRatio<2.0){
+      console.log('Beep rejected: onset not sharp enough (ratio='+preOnsetRatio.toFixed(2)+')');
+      return -1;
+    }
+
+    const beepTime=rms[onsetIdx].time;
+
+    // Final sanity: beep should be in first 5 seconds
+    if(beepTime>5.0){
+      console.log('Beep rejected: onset too late ('+beepTime.toFixed(2)+'s)');
+      return -1;
+    }
+
+    console.log('Beep ACCEPTED at '+beepTime.toFixed(3)+'s');
+    return beepTime;
 
   }catch(e){
     console.error('Beep detection error:',e);
@@ -1511,78 +1488,51 @@ function detectWalls(cameraPanLog, motionLog, edgeLog){
 // Wall touches are at the local extrema of the vertical motion center.
 function detectWallsAcross(vMotionLog, motionLog){
   const lapLen=getLapLen();
-  const minGap=lapLen===50?12:4; // minimum seconds between walls
+  const minGap=lapLen===50?12:6; // minimum seconds between walls (6s for 25yd/m)
   const expected=getExpectedWalls();
+  const startT=beepTime>0?beepTime:0;
 
-  console.log('detectWallsAcross: '+vMotionLog.length+' vMotion samples, '+motionLog.length+' motion samples, expected '+expected+' walls, minGap='+minGap);
+  console.log('detectWallsAcross: '+vMotionLog.length+' vMotion samples, '+motionLog.length+' motion samples, expected '+expected+' walls, minGap='+minGap+', startT='+startT.toFixed(2));
 
-  // ===== SIGNAL 1: Vertical motion center oscillation =====
-  // Smooth the vertical center signal more aggressively
-  const smoothV=[];
-  const hw=7; // wider window for smoother signal
-  for(let i=0;i<vMotionLog.length;i++){
-    let sum=0,cnt=0;
-    for(let j=Math.max(0,i-hw);j<=Math.min(vMotionLog.length-1,i+hw);j++){
-      sum+=vMotionLog[j].yCenter;cnt++;
+  // ===== Collect ALL candidate wall times from multiple signals =====
+  const allCandidates=[];
+
+  // --- SIGNAL 1: Vertical motion center extrema ---
+  if(vMotionLog.length>=10){
+    const smoothV=[];
+    const hw=7;
+    for(let i=0;i<vMotionLog.length;i++){
+      let sum=0,cnt=0;
+      for(let j=Math.max(0,i-hw);j<=Math.min(vMotionLog.length-1,i+hw);j++){
+        sum+=vMotionLog[j].yCenter;cnt++;
+      }
+      smoothV.push({time:vMotionLog[i].time,yCenter:sum/cnt});
     }
-    smoothV.push({time:vMotionLog[i].time,yCenter:sum/cnt});
-  }
 
-  const vOscWalls=[];
-  if(smoothV.length>=10){
-    // Find local extrema (peaks and valleys) of the smoothed yCenter
-    // These correspond to wall touches: swimmer at near wall (low yCenter) or far wall (high yCenter)
     for(let i=2;i<smoothV.length-2;i++){
       const prev2=smoothV[i-2].yCenter,prev1=smoothV[i-1].yCenter;
       const curr=smoothV[i].yCenter;
       const next1=smoothV[i+1].yCenter,next2=smoothV[i+2].yCenter;
 
-      // Local max or min (extremum)
       const isMax=curr>=prev1&&curr>=prev2&&curr>=next1&&curr>=next2&&(curr>prev1||curr>next1);
       const isMin=curr<=prev1&&curr<=prev2&&curr<=next1&&curr<=next2&&(curr<prev1||curr<next1);
 
       if(isMax||isMin){
         const t=smoothV[i].time;
-        // Measure the amplitude of the oscillation around this point
-        // Look at range in ±5 samples
         let localMin=curr,localMax=curr;
         for(let j=Math.max(0,i-8);j<=Math.min(smoothV.length-1,i+8);j++){
           if(smoothV[j].yCenter<localMin)localMin=smoothV[j].yCenter;
           if(smoothV[j].yCenter>localMax)localMax=smoothV[j].yCenter;
         }
         const amplitude=localMax-localMin;
-        if(amplitude>0.01){ // very low threshold — any real swimmer motion
-          const conf=Math.min(1.0,amplitude*10);
-          vOscWalls.push({time:t,confidence:conf,method:'v-extremum',amplitude:amplitude,isMax:isMax});
+        if(amplitude>0.01){
+          allCandidates.push({time:t,confidence:Math.min(1.0,amplitude*10),method:'v-extremum'});
         }
       }
     }
-
-    // Enforce minimum gap between extrema — keep the strongest
-    const filteredVOsc=[];
-    vOscWalls.sort(function(a,b){return a.time-b.time});
-    let lastT=-minGap*2;
-    for(let i=0;i<vOscWalls.length;i++){
-      if(vOscWalls[i].time-lastT>=minGap){
-        filteredVOsc.push(vOscWalls[i]);
-        lastT=vOscWalls[i].time;
-      } else {
-        // Replace last if this one has higher confidence
-        if(filteredVOsc.length>0&&vOscWalls[i].confidence>filteredVOsc[filteredVOsc.length-1].confidence){
-          filteredVOsc[filteredVOsc.length-1]=vOscWalls[i];
-          lastT=vOscWalls[i].time;
-        }
-      }
-    }
-    console.log('V-oscillation extrema (after gap filter):',filteredVOsc.length,filteredVOsc);
-    vOscWalls.length=0;
-    filteredVOsc.forEach(function(w){vOscWalls.push(w)});
   }
 
-  // ===== SIGNAL 2: Motion energy pattern =====
-  // In across-the-blocks view, motion energy dips when swimmer is at the wall (turn/streamline)
-  // and peaks when swimmer is mid-pool
-  const motionWalls=[];
+  // --- SIGNAL 2: Motion energy dips ---
   if(motionLog.length>10){
     const smoothE=[];
     for(let i=0;i<motionLog.length;i++){
@@ -1593,83 +1543,149 @@ function detectWallsAcross(vMotionLog, motionLog){
       smoothE.push({time:motionLog[i].time,e:sum/cnt});
     }
 
-    // Find local minima of motion energy (dips = wall touches)
     for(let i=3;i<smoothE.length-3;i++){
-      const prev=smoothE[i-1].e, curr=smoothE[i].e, next=smoothE[i+1].e;
-      const prev2=smoothE[i-2].e, next2=smoothE[i+2].e;
+      const prev=smoothE[i-1].e,curr=smoothE[i].e,next=smoothE[i+1].e;
+      const prev2=smoothE[i-2].e,next2=smoothE[i+2].e;
       if(curr<=prev&&curr<=next&&curr<=prev2&&curr<=next2&&(curr<prev||curr<next)){
-        // Measure the dip depth
         let localMax=curr;
         for(let j=Math.max(0,i-8);j<=Math.min(smoothE.length-1,i+8);j++){
           if(smoothE[j].e>localMax)localMax=smoothE[j].e;
         }
         const depth=localMax-curr;
         const relDepth=localMax>0?depth/localMax:0;
-        if(relDepth>0.15){ // at least 15% dip
-          const conf=Math.min(1.0,relDepth*2);
-          motionWalls.push({time:smoothE[i].time,confidence:conf,method:'energy-dip',depth:relDepth});
+        if(relDepth>0.15){
+          allCandidates.push({time:smoothE[i].time,confidence:Math.min(1.0,relDepth*2)*0.7,method:'energy-dip'});
         }
       }
     }
-
-    // Enforce minimum gap
-    const filteredM=[];
-    motionWalls.sort(function(a,b){return a.time-b.time});
-    let lastMT=-minGap*2;
-    for(let i=0;i<motionWalls.length;i++){
-      if(motionWalls[i].time-lastMT>=minGap){
-        filteredM.push(motionWalls[i]);
-        lastMT=motionWalls[i].time;
-      } else if(filteredM.length>0&&motionWalls[i].confidence>filteredM[filteredM.length-1].confidence){
-        filteredM[filteredM.length-1]=motionWalls[i];
-        lastMT=motionWalls[i].time;
-      }
-    }
-    console.log('Energy dip walls (after gap filter):',filteredM.length,filteredM);
-    motionWalls.length=0;
-    filteredM.forEach(function(w){motionWalls.push(w)});
   }
 
-  // ===== MERGE signals =====
-  const walls=[];
+  // Skip candidates too close to start (splash zone)
+  const skipUntil=startT+3; // at least 3s after start for first wall
+  const validCandidates=allCandidates.filter(function(c){return c.time>skipUntil});
+  validCandidates.sort(function(a,b){return a.time-b.time});
 
-  // Start with v-oscillation walls (primary)
-  vOscWalls.forEach(function(w){walls.push(w)});
+  console.log('Raw candidates (after skip):',validCandidates.length,validCandidates.map(function(c){return c.time.toFixed(1)+'s('+c.method+','+c.confidence.toFixed(2)+')'}));
 
-  // Add motion energy walls that don't overlap
-  motionWalls.forEach(function(mw){
-    let overlaps=false;
-    for(let i=0;i<walls.length;i++){
-      if(Math.abs(walls[i].time-mw.time)<3.0){
-        // Boost confidence of existing wall
-        walls[i].confidence=Math.min(1.0,walls[i].confidence+mw.confidence*0.3);
-        walls[i].method+='+'+'energy';
-        overlaps=true;break;
+  // Merge candidates within 2s of each other (keep strongest, boost confidence for agreement)
+  const merged=[];
+  for(let i=0;i<validCandidates.length;i++){
+    let found=false;
+    for(let j=0;j<merged.length;j++){
+      if(Math.abs(merged[j].time-validCandidates[i].time)<2.0){
+        // Boost the existing one's confidence
+        merged[j].confidence=Math.min(1.0,merged[j].confidence+validCandidates[i].confidence*0.4);
+        merged[j].method+=('+'+validCandidates[i].method);
+        // Prefer the time from the higher-confidence signal
+        if(validCandidates[i].confidence>merged[j].confidence*0.8){
+          merged[j].time=(merged[j].time+validCandidates[i].time)/2; // average the times
+        }
+        found=true;break;
       }
     }
-    if(!overlaps){
-      mw.confidence*=0.7; // lower confidence for motion-only detection
-      walls.push(mw);
-    }
-  });
-
-  walls.sort(function(a,b){return a.time-b.time});
-
-  // Skip walls in first 2 seconds (likely start splash, not a wall touch)
-  const startSkip=beepTime>0?beepTime+2:2;
-  const validWalls=walls.filter(function(w){return w.time>startSkip});
-
-  console.log('All merged walls before trim:',validWalls.length,validWalls);
-
-  // Trim to expected wall count — keep highest confidence
-  if(validWalls.length>expected){
-    validWalls.sort(function(a,b){return b.confidence-a.confidence});
-    validWalls.length=expected;
-    validWalls.sort(function(a,b){return a.time-b.time});
+    if(!found) merged.push({time:validCandidates[i].time,confidence:validCandidates[i].confidence,method:validCandidates[i].method});
   }
 
-  console.log('Final walls:',validWalls.length,validWalls);
-  return validWalls;
+  console.log('Merged candidates:',merged.length,merged.map(function(c){return c.time.toFixed(1)+'s('+c.confidence.toFixed(2)+')'}));
+
+  if(merged.length===0) return [];
+  if(expected===0) return [];
+
+  // ===== DOMAIN-KNOWLEDGE WALL SELECTION =====
+  // For a race, walls should be roughly evenly spaced.
+  // For 100 SCY (~55s): walls at ~12s, ~26s, ~40s, ~55s from start
+  // First lap is fastest (dive), remaining ~equal, 3rd may be slowest.
+  // Use dynamic programming: find the combination of `expected` walls from candidates
+  // that best matches even spacing.
+
+  // Estimate total race time: last motion activity
+  let raceEndT=0;
+  if(motionLog.length>10){
+    // Find where significant motion stops (swimmer finishes)
+    const avgE=motionLog.reduce(function(s,m){return s+m.energy},0)/motionLog.length;
+    for(let i=motionLog.length-1;i>=0;i--){
+      if(motionLog[i].energy>avgE*0.3){raceEndT=motionLog[i].time;break}
+    }
+  }
+  if(raceEndT<10) raceEndT=merged[merged.length-1].time; // fallback
+
+  const totalRace=raceEndT-startT;
+  const avgLap=totalRace/expected;
+
+  // Expected wall times: first lap ~15% faster than average, rest ~equal
+  // For 100 SCY (4 walls), first wall at ~0.85*avg, then subsequent at ~avg*1.05
+  const expectedTimes=[];
+  const firstLapFactor=0.85; // first lap is fastest due to dive
+  const firstLap=avgLap*firstLapFactor;
+  const remainingTime=totalRace-firstLap;
+  const otherLap=expected>1?remainingTime/(expected-1):0;
+
+  let cumT=startT;
+  for(let w=0;w<expected;w++){
+    if(w===0) cumT+=firstLap;
+    else cumT+=otherLap;
+    expectedTimes.push(cumT);
+  }
+  console.log('Expected wall times (model):',expectedTimes.map(function(t){return t.toFixed(1)+'s'}));
+  console.log('Race estimate: totalRace='+totalRace.toFixed(1)+'s, avgLap='+avgLap.toFixed(1)+'s, firstLap='+firstLap.toFixed(1)+'s, otherLap='+otherLap.toFixed(1)+'s');
+
+  // Score each candidate by proximity to any expected wall time
+  // Then use greedy assignment: for each expected wall, pick closest candidate
+  const bestWalls=[];
+  const usedCandidates=new Set();
+
+  for(let w=0;w<expected;w++){
+    const target=expectedTimes[w];
+    // Tolerance: ±20% of average lap time
+    const tolerance=avgLap*0.25;
+    let bestIdx=-1, bestScore=-Infinity;
+
+    for(let c=0;c<merged.length;c++){
+      if(usedCandidates.has(c)) continue;
+      const dist=Math.abs(merged[c].time-target);
+      if(dist>tolerance) continue;
+
+      // Score: closeness to expected + candidate confidence
+      // Closer to expected = higher score; also reward confidence
+      const closenessScore=1.0-dist/tolerance; // 0..1
+      const score=closenessScore*0.6 + merged[c].confidence*0.4;
+      if(score>bestScore){bestScore=score;bestIdx=c}
+    }
+
+    if(bestIdx>=0){
+      usedCandidates.add(bestIdx);
+      bestWalls.push({time:merged[bestIdx].time,confidence:merged[bestIdx].confidence,method:merged[bestIdx].method});
+    } else {
+      // No candidate near expected — use expected time as synthetic wall (low confidence)
+      bestWalls.push({time:target,confidence:0.2,method:'expected-model'});
+      console.log('Wall '+w+': no candidate near expected '+target.toFixed(1)+'s, using model estimate');
+    }
+  }
+
+  bestWalls.sort(function(a,b){return a.time-b.time});
+
+  // Verify spacing: check that splits are reasonable
+  let prevT=startT;
+  const splits=[];
+  for(let i=0;i<bestWalls.length;i++){
+    splits.push(bestWalls[i].time-prevT);
+    prevT=bestWalls[i].time;
+  }
+  console.log('Final walls:',bestWalls.length,bestWalls.map(function(w){return w.time.toFixed(1)+'s('+w.method+')'}));
+  console.log('Splits:',splits.map(function(s){return s.toFixed(1)+'s'}));
+
+  // Sanity check: if any split is <5s or >30s for 25yd course, something is wrong
+  const badSplit=splits.some(function(s){return s<5||s>30});
+  if(badSplit&&merged.length>=expected){
+    console.log('Bad splits detected, falling back to evenly-spaced model walls');
+    const fallback=[];
+    for(let w=0;w<expected;w++){
+      fallback.push({time:expectedTimes[w],confidence:0.3,method:'even-spacing-fallback'});
+    }
+    return fallback;
+  }
+
+  return bestWalls;
 }
 
 // ===== GRAPH (Across-the-blocks mode) =====
