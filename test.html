@@ -341,21 +341,27 @@ function cropToSwimmerLane(canvas,ctx,scanW,scanH){
   const lane=selectedLanes[0];
 
   if(cameraAngle==='across'){
-    // Across view: ropes are vertical. Crop X range between the two ropes.
-    if(lane.ropeLeftV&&lane.ropeRightV){
-      const x1=Math.floor(lane.ropeLeftV.xNorm*scanW);
-      const x2=Math.floor(lane.ropeRightV.xNorm*scanW);
-      const left=Math.max(0,Math.min(x1,x2));
-      const right=Math.min(scanW,Math.max(x1,x2));
-      const w=right-left;
-      if(w<20) return null;
-      return {x:left,y:0,w:w,h:scanH};
-    }
-    // No ropes — use center 40% of frame (rough lane estimate)
+    // Across view: ropes are vertical. Crop centered on the TAP POSITION (which is the
+    // correct swimmer) using rope spacing to estimate lane width.
+    // This avoids relying on rope positions being perfectly aligned, which can be off by
+    // one lane with angled cameras.
     const tapX=lane.tapX||0.5;
-    const laneW=0.25; // ~25% width for one lane
-    const left=Math.max(0,Math.floor((tapX-laneW/2)*scanW));
-    const right=Math.min(scanW,Math.floor((tapX+laneW/2)*scanW));
+
+    // Estimate lane width from detected rope spacing
+    let laneW=0.20; // default ~20% of frame width for one lane
+    if(detectedRopes.length>=2){
+      // Sort ropes by xNorm and compute average spacing
+      const sorted=detectedRopes.slice().sort(function(a,b){return a.xNorm-b.xNorm});
+      let totalSpacing=0;
+      for(let i=1;i<sorted.length;i++) totalSpacing+=(sorted[i].xNorm-sorted[i-1].xNorm);
+      const avgSpacing=totalSpacing/(sorted.length-1);
+      if(avgSpacing>0.05&&avgSpacing<0.5) laneW=avgSpacing;
+    }
+    // Add 10% padding on each side to account for rope detection offset
+    const padded=laneW*1.2;
+    const left=Math.max(0,Math.floor((tapX-padded/2)*scanW));
+    const right=Math.min(scanW,Math.floor((tapX+padded/2)*scanW));
+    if(right-left<20) return null;
     return {x:left,y:0,w:right-left,h:scanH};
   } else {
     // Side view: ropes are horizontal. Crop Y range.
