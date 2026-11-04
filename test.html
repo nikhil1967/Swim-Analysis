@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Swim Analysis — Test</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -306,6 +308,74 @@ let ropeColorLog=[]; // [{time, leftColors:[], rightColors:[]}] — per-frame ro
 let scanning=false;
 let scanned=false;
 
+// MoveNet pose detection
+let poseDetector=null;
+let poseModelLoading=false;
+let poseLog=[]; // [{time, keypoints, swimmerY, swimmerX, confidence}]
+
+async function loadPoseModel(){
+  if(poseDetector) return poseDetector;
+  if(poseModelLoading) return null;
+  poseModelLoading=true;
+  try{
+    // Use MoveNet SinglePose Lightning — fastest, good enough for tracking swimmer position
+    await tf.ready();
+    tf.env().set('WEBGL_CPU_FORWARD',false);
+    const model=poseDetection.SupportedModels.MoveNet;
+    poseDetector=await poseDetection.createDetector(model,{
+      modelType:poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING
+    });
+    console.log('MoveNet model loaded successfully');
+    poseModelLoading=false;
+    return poseDetector;
+  }catch(e){
+    console.error('MoveNet loading failed:',e);
+    poseModelLoading=false;
+    return null;
+  }
+}
+
+// Crop the frame to the selected swimmer's lane region before pose detection
+function cropToSwimmerLane(canvas,ctx,scanW,scanH){
+  if(selectedLanes.length===0) return null;
+  const lane=selectedLanes[0];
+
+  if(cameraAngle==='across'){
+    // Across view: ropes are vertical. Crop X range between the two ropes.
+    if(lane.ropeLeftV&&lane.ropeRightV){
+      const x1=Math.floor(lane.ropeLeftV.xNorm*scanW);
+      const x2=Math.floor(lane.ropeRightV.xNorm*scanW);
+      const left=Math.max(0,Math.min(x1,x2));
+      const right=Math.min(scanW,Math.max(x1,x2));
+      const w=right-left;
+      if(w<20) return null;
+      return {x:left,y:0,w:w,h:scanH};
+    }
+    // No ropes — use center 40% of frame (rough lane estimate)
+    const tapX=lane.tapX||0.5;
+    const laneW=0.25; // ~25% width for one lane
+    const left=Math.max(0,Math.floor((tapX-laneW/2)*scanW));
+    const right=Math.min(scanW,Math.floor((tapX+laneW/2)*scanW));
+    return {x:left,y:0,w:right-left,h:scanH};
+  } else {
+    // Side view: ropes are horizontal. Crop Y range.
+    if(lane.ropeAbove&&lane.ropeBelow){
+      const y1=Math.floor(lane.ropeAbove.yNorm*scanH);
+      const y2=Math.floor(lane.ropeBelow.yNorm*scanH);
+      const top=Math.max(0,Math.min(y1,y2));
+      const bottom=Math.min(scanH,Math.max(y1,y2));
+      const h=bottom-top;
+      if(h<20) return null;
+      return {x:0,y:top,w:scanW,h:h};
+    }
+    const tapY=lane.tapY||0.5;
+    const laneH=0.2;
+    const top=Math.max(0,Math.floor((tapY-laneH/2)*scanH));
+    const bottom=Math.min(scanH,Math.floor((tapY+laneH/2)*scanH));
+    return {x:0,y:top,w:scanW,h:bottom-top};
+  }
+}
+
 // Pending lane taps (stored before ropes are detected)
 let pendingLaneTaps=[]; // [{nx,ny}] — stored when user taps before scan
 
@@ -332,7 +402,7 @@ function loadNewVideo(){
   videoReady=false;playing=false;scanning=false;scanned=false;
   beepTime=-1;blockDepartTime=-1;wallTouches=[];ropeColorLog=[];
   detectedRopes=[];selectedLanes=[];pendingLaneTaps=[];
-  ropeLeft=null;ropeRight=null;ropesDetected=false;avgFrameData=null;
+  ropeLeft=null;ropeRight=null;ropesDetected=false;avgFrameData=null;poseLog=[];poseDetector=null;
   if(V){V.pause();V.src='';V=null;}
   document.getElementById('player-area').style.display='none';
   document.getElementById('upload-zone').style.display='flex';
@@ -1486,204 +1556,258 @@ function detectWalls(cameraPanLog, motionLog, edgeLog){
 // ===== WALL DETECTION — ACROSS THE BLOCKS (vertical oscillation) =====
 // Swimmer oscillates between near wall (bottom of frame) and far wall (top of frame).
 // Wall touches are at the local extrema of the vertical motion center.
-function detectWallsAcross(vMotionLog, motionLog){
+function detectWallsAcross(vMotionLog, motionLog, posesArg){
   const lapLen=getLapLen();
   const minGap=lapLen===50?12:6; // minimum seconds between walls (6s for 25yd/m)
   const expected=getExpectedWalls();
   const startT=beepTime>0?beepTime:0;
+  const poses=posesArg||poseLog||[];
 
-  console.log('detectWallsAcross: '+vMotionLog.length+' vMotion samples, '+motionLog.length+' motion samples, expected '+expected+' walls, minGap='+minGap+', startT='+startT.toFixed(2));
+  console.log('detectWallsAcross: expected '+expected+' walls, minGap='+minGap+
+    ', startT='+startT.toFixed(2)+', poses='+poses.length+
+    ', vMotion='+vMotionLog.length+', motion='+motionLog.length);
 
-  // ===== Collect ALL candidate wall times from multiple signals =====
-  const allCandidates=[];
-
-  // --- SIGNAL 1: Vertical motion center extrema ---
-  if(vMotionLog.length>=10){
-    const smoothV=[];
-    const hw=7;
-    for(let i=0;i<vMotionLog.length;i++){
-      let sum=0,cnt=0;
-      for(let j=Math.max(0,i-hw);j<=Math.min(vMotionLog.length-1,i+hw);j++){
-        sum+=vMotionLog[j].yCenter;cnt++;
-      }
-      smoothV.push({time:vMotionLog[i].time,yCenter:sum/cnt});
-    }
-
-    for(let i=2;i<smoothV.length-2;i++){
-      const prev2=smoothV[i-2].yCenter,prev1=smoothV[i-1].yCenter;
-      const curr=smoothV[i].yCenter;
-      const next1=smoothV[i+1].yCenter,next2=smoothV[i+2].yCenter;
-
-      const isMax=curr>=prev1&&curr>=prev2&&curr>=next1&&curr>=next2&&(curr>prev1||curr>next1);
-      const isMin=curr<=prev1&&curr<=prev2&&curr<=next1&&curr<=next2&&(curr<prev1||curr<next1);
-
-      if(isMax||isMin){
-        const t=smoothV[i].time;
-        let localMin=curr,localMax=curr;
-        for(let j=Math.max(0,i-8);j<=Math.min(smoothV.length-1,i+8);j++){
-          if(smoothV[j].yCenter<localMin)localMin=smoothV[j].yCenter;
-          if(smoothV[j].yCenter>localMax)localMax=smoothV[j].yCenter;
-        }
-        const amplitude=localMax-localMin;
-        if(amplitude>0.01){
-          allCandidates.push({time:t,confidence:Math.min(1.0,amplitude*10),method:'v-extremum'});
-        }
-      }
-    }
-  }
-
-  // --- SIGNAL 2: Motion energy dips ---
-  if(motionLog.length>10){
-    const smoothE=[];
-    for(let i=0;i<motionLog.length;i++){
-      let sum=0,cnt=0;
-      for(let j=Math.max(0,i-4);j<=Math.min(motionLog.length-1,i+4);j++){
-        sum+=motionLog[j].energy;cnt++;
-      }
-      smoothE.push({time:motionLog[i].time,e:sum/cnt});
-    }
-
-    for(let i=3;i<smoothE.length-3;i++){
-      const prev=smoothE[i-1].e,curr=smoothE[i].e,next=smoothE[i+1].e;
-      const prev2=smoothE[i-2].e,next2=smoothE[i+2].e;
-      if(curr<=prev&&curr<=next&&curr<=prev2&&curr<=next2&&(curr<prev||curr<next)){
-        let localMax=curr;
-        for(let j=Math.max(0,i-8);j<=Math.min(smoothE.length-1,i+8);j++){
-          if(smoothE[j].e>localMax)localMax=smoothE[j].e;
-        }
-        const depth=localMax-curr;
-        const relDepth=localMax>0?depth/localMax:0;
-        if(relDepth>0.15){
-          allCandidates.push({time:smoothE[i].time,confidence:Math.min(1.0,relDepth*2)*0.7,method:'energy-dip'});
-        }
-      }
-    }
-  }
-
-  // Skip candidates too close to start (splash zone)
-  const skipUntil=startT+3; // at least 3s after start for first wall
-  const validCandidates=allCandidates.filter(function(c){return c.time>skipUntil});
-  validCandidates.sort(function(a,b){return a.time-b.time});
-
-  console.log('Raw candidates (after skip):',validCandidates.length,validCandidates.map(function(c){return c.time.toFixed(1)+'s('+c.method+','+c.confidence.toFixed(2)+')'}));
-
-  // Merge candidates within 2s of each other (keep strongest, boost confidence for agreement)
-  const merged=[];
-  for(let i=0;i<validCandidates.length;i++){
-    let found=false;
-    for(let j=0;j<merged.length;j++){
-      if(Math.abs(merged[j].time-validCandidates[i].time)<2.0){
-        // Boost the existing one's confidence
-        merged[j].confidence=Math.min(1.0,merged[j].confidence+validCandidates[i].confidence*0.4);
-        merged[j].method+=('+'+validCandidates[i].method);
-        // Prefer the time from the higher-confidence signal
-        if(validCandidates[i].confidence>merged[j].confidence*0.8){
-          merged[j].time=(merged[j].time+validCandidates[i].time)/2; // average the times
-        }
-        found=true;break;
-      }
-    }
-    if(!found) merged.push({time:validCandidates[i].time,confidence:validCandidates[i].confidence,method:validCandidates[i].method});
-  }
-
-  console.log('Merged candidates:',merged.length,merged.map(function(c){return c.time.toFixed(1)+'s('+c.confidence.toFixed(2)+')'}));
-
-  if(merged.length===0) return [];
   if(expected===0) return [];
 
-  // ===== DOMAIN-KNOWLEDGE WALL SELECTION =====
-  // For a race, walls should be roughly evenly spaced.
-  // For 100 SCY (~55s): walls at ~12s, ~26s, ~40s, ~55s from start
-  // First lap is fastest (dive), remaining ~equal, 3rd may be slowest.
-  // Use dynamic programming: find the combination of `expected` walls from candidates
-  // that best matches even spacing.
+  // ===== PRIMARY SIGNAL: MoveNet swimmer Y-position =====
+  // In across-the-blocks view, swimmer Y-position oscillates as they go near↔far wall.
+  // Wall touches = extrema (peaks and valleys) of Y-position trajectory.
+  const poseWalls=[];
 
-  // Estimate total race time: last motion activity
+  if(poses.length>=10){
+    console.log('Using MoveNet pose trajectory as PRIMARY wall detection signal');
+
+    // Smooth the swimmer Y-position
+    const hw=5; // smoothing half-window
+    const smoothY=[];
+    for(let i=0;i<poses.length;i++){
+      let sum=0,cnt=0,wSum=0;
+      for(let j=Math.max(0,i-hw);j<=Math.min(poses.length-1,i+hw);j++){
+        const w=poses[j].confidence;
+        sum+=poses[j].swimmerY*w;wSum+=w;cnt++;
+      }
+      smoothY.push({time:poses[i].time,y:wSum>0?sum/wSum:poses[i].swimmerY,conf:poses[i].confidence});
+    }
+
+    console.log('Smoothed pose Y trajectory (first 10):', smoothY.slice(0,10).map(function(s){
+      return s.time.toFixed(1)+'s:'+s.y.toFixed(3)
+    }));
+
+    // Find extrema of the smoothed Y trajectory
+    // These are wall touches: swimmer at near wall (one extreme) or far wall (other extreme)
+    const rawExtrema=[];
+    for(let i=2;i<smoothY.length-2;i++){
+      const p2=smoothY[i-2].y,p1=smoothY[i-1].y;
+      const c=smoothY[i].y;
+      const n1=smoothY[i+1].y,n2=smoothY[i+2].y;
+
+      const isMax=c>=p1&&c>=p2&&c>=n1&&c>=n2&&(c>p1||c>n1);
+      const isMin=c<=p1&&c<=p2&&c<=n1&&c<=n2&&(c<p1||c<n1);
+
+      if(isMax||isMin){
+        // Measure amplitude around this extremum
+        let localMin=c,localMax=c;
+        for(let j=Math.max(0,i-10);j<=Math.min(smoothY.length-1,i+10);j++){
+          if(smoothY[j].y<localMin)localMin=smoothY[j].y;
+          if(smoothY[j].y>localMax)localMax=smoothY[j].y;
+        }
+        const amplitude=localMax-localMin;
+        if(amplitude>0.02){ // need meaningful oscillation
+          rawExtrema.push({
+            time:smoothY[i].time,
+            y:c,
+            amplitude:amplitude,
+            confidence:Math.min(1.0,amplitude*8)*smoothY[i].conf,
+            isMax:isMax,
+            method:'pose-extremum'
+          });
+        }
+      }
+    }
+
+    console.log('Raw pose extrema:',rawExtrema.length,rawExtrema.map(function(e){
+      return e.time.toFixed(1)+'s('+(e.isMax?'MAX':'MIN')+',y='+e.y.toFixed(3)+',amp='+e.amplitude.toFixed(3)+')'
+    }));
+
+    // Filter: skip first 3s after start (dive splash), enforce minimum gap
+    const skipUntil=startT+3;
+    let lastTime=-100;
+    for(let i=0;i<rawExtrema.length;i++){
+      if(rawExtrema[i].time<=skipUntil) continue;
+      if(rawExtrema[i].time-lastTime>=minGap){
+        poseWalls.push(rawExtrema[i]);
+        lastTime=rawExtrema[i].time;
+      } else if(poseWalls.length>0&&rawExtrema[i].confidence>poseWalls[poseWalls.length-1].confidence){
+        poseWalls[poseWalls.length-1]=rawExtrema[i];
+        lastTime=rawExtrema[i].time;
+      }
+    }
+
+    console.log('Pose walls after gap filter:',poseWalls.length,poseWalls.map(function(w){
+      return w.time.toFixed(1)+'s(conf='+w.confidence.toFixed(2)+')'
+    }));
+  }
+
+  // ===== FALLBACK SIGNALS (pixel-based) — used if MoveNet gave few/no results =====
+  const pixelCandidates=[];
+
+  if(poseWalls.length<expected){
+    // Vertical motion center extrema (old method)
+    if(vMotionLog.length>=10){
+      const smoothV=[];
+      const hw=7;
+      for(let i=0;i<vMotionLog.length;i++){
+        let sum=0,cnt=0;
+        for(let j=Math.max(0,i-hw);j<=Math.min(vMotionLog.length-1,i+hw);j++){
+          sum+=vMotionLog[j].yCenter;cnt++;
+        }
+        smoothV.push({time:vMotionLog[i].time,yCenter:sum/cnt});
+      }
+      for(let i=2;i<smoothV.length-2;i++){
+        const p2=smoothV[i-2].yCenter,p1=smoothV[i-1].yCenter;
+        const c=smoothV[i].yCenter;
+        const n1=smoothV[i+1].yCenter,n2=smoothV[i+2].yCenter;
+        const isMax=c>=p1&&c>=p2&&c>=n1&&c>=n2&&(c>p1||c>n1);
+        const isMin=c<=p1&&c<=p2&&c<=n1&&c<=n2&&(c<p1||c<n1);
+        if(isMax||isMin){
+          let lMin=c,lMax=c;
+          for(let j=Math.max(0,i-8);j<=Math.min(smoothV.length-1,i+8);j++){
+            if(smoothV[j].yCenter<lMin)lMin=smoothV[j].yCenter;
+            if(smoothV[j].yCenter>lMax)lMax=smoothV[j].yCenter;
+          }
+          const amp=lMax-lMin;
+          if(amp>0.01){
+            pixelCandidates.push({time:smoothV[i].time,confidence:Math.min(1.0,amp*10)*0.6,method:'v-extremum'});
+          }
+        }
+      }
+    }
+
+    // Motion energy dips
+    if(motionLog.length>10){
+      const smoothE=[];
+      for(let i=0;i<motionLog.length;i++){
+        let sum=0,cnt=0;
+        for(let j=Math.max(0,i-4);j<=Math.min(motionLog.length-1,i+4);j++){
+          sum+=motionLog[j].energy;cnt++;
+        }
+        smoothE.push({time:motionLog[i].time,e:sum/cnt});
+      }
+      for(let i=3;i<smoothE.length-3;i++){
+        const curr=smoothE[i].e;
+        if(curr<=smoothE[i-1].e&&curr<=smoothE[i+1].e&&curr<=smoothE[i-2].e&&curr<=smoothE[i+2].e){
+          let localMax=curr;
+          for(let j=Math.max(0,i-8);j<=Math.min(smoothE.length-1,i+8);j++){
+            if(smoothE[j].e>localMax)localMax=smoothE[j].e;
+          }
+          const relDepth=localMax>0?(localMax-curr)/localMax:0;
+          if(relDepth>0.15){
+            pixelCandidates.push({time:smoothE[i].time,confidence:Math.min(1.0,relDepth*2)*0.5,method:'energy-dip'});
+          }
+        }
+      }
+    }
+  }
+
+  // ===== MERGE: pose walls + pixel candidates =====
+  const allWalls=poseWalls.slice();
+  const skipUntil2=startT+3;
+
+  // Add pixel candidates that don't overlap with pose walls
+  pixelCandidates.filter(function(c){return c.time>skipUntil2}).forEach(function(pc){
+    let overlaps=false;
+    for(let i=0;i<allWalls.length;i++){
+      if(Math.abs(allWalls[i].time-pc.time)<2.5){
+        // Boost existing wall confidence
+        allWalls[i].confidence=Math.min(1.0,allWalls[i].confidence+pc.confidence*0.2);
+        allWalls[i].method+=('+'+pc.method);
+        overlaps=true;break;
+      }
+    }
+    if(!overlaps) allWalls.push(pc);
+  });
+
+  allWalls.sort(function(a,b){return a.time-b.time});
+  console.log('All wall candidates:',allWalls.length,allWalls.map(function(w){
+    return w.time.toFixed(1)+'s('+w.method+','+w.confidence.toFixed(2)+')'
+  }));
+
+  if(allWalls.length===0) return [];
+
+  // ===== SELECT best `expected` walls using domain knowledge =====
+  // Estimate total race time from last significant motion or last wall candidate
   let raceEndT=0;
   if(motionLog.length>10){
-    // Find where significant motion stops (swimmer finishes)
     const avgE=motionLog.reduce(function(s,m){return s+m.energy},0)/motionLog.length;
     for(let i=motionLog.length-1;i>=0;i--){
       if(motionLog[i].energy>avgE*0.3){raceEndT=motionLog[i].time;break}
     }
   }
-  if(raceEndT<10) raceEndT=merged[merged.length-1].time; // fallback
+  if(raceEndT<10) raceEndT=allWalls[allWalls.length-1].time;
 
   const totalRace=raceEndT-startT;
   const avgLap=totalRace/expected;
 
-  // Expected wall times: first lap ~15% faster than average, rest ~equal
-  // For 100 SCY (4 walls), first wall at ~0.85*avg, then subsequent at ~avg*1.05
-  const expectedTimes=[];
-  const firstLapFactor=0.85; // first lap is fastest due to dive
+  // Model expected wall times: first lap ~15% faster (dive), rest equal
+  const firstLapFactor=0.85;
   const firstLap=avgLap*firstLapFactor;
-  const remainingTime=totalRace-firstLap;
-  const otherLap=expected>1?remainingTime/(expected-1):0;
-
+  const otherLap=expected>1?(totalRace-firstLap)/(expected-1):0;
+  const expectedTimes=[];
   let cumT=startT;
   for(let w=0;w<expected;w++){
-    if(w===0) cumT+=firstLap;
-    else cumT+=otherLap;
+    cumT+=(w===0?firstLap:otherLap);
     expectedTimes.push(cumT);
   }
-  console.log('Expected wall times (model):',expectedTimes.map(function(t){return t.toFixed(1)+'s'}));
-  console.log('Race estimate: totalRace='+totalRace.toFixed(1)+'s, avgLap='+avgLap.toFixed(1)+'s, firstLap='+firstLap.toFixed(1)+'s, otherLap='+otherLap.toFixed(1)+'s');
+  console.log('Expected wall times:',expectedTimes.map(function(t){return t.toFixed(1)+'s'}));
 
-  // Score each candidate by proximity to any expected wall time
-  // Then use greedy assignment: for each expected wall, pick closest candidate
+  // If we have exactly the right number of pose walls, prefer them directly
+  if(poseWalls.length===expected){
+    console.log('MoveNet found exactly '+expected+' walls — using pose detections directly');
+    // Verify they're reasonable
+    let prevT2=startT;
+    const splits=poseWalls.map(function(w){const s=w.time-prevT2;prevT2=w.time;return s});
+    const badSplit=splits.some(function(s){return s<4||s>35});
+    if(!badSplit){
+      console.log('Pose splits:',splits.map(function(s){return s.toFixed(1)+'s'}));
+      return poseWalls;
+    }
+    console.log('Pose splits unreasonable:',splits.map(function(s){return s.toFixed(1)+'s'})+', using domain model selection');
+  }
+
+  // Greedy assignment: match each expected wall to nearest candidate
   const bestWalls=[];
-  const usedCandidates=new Set();
+  const used=new Set();
 
   for(let w=0;w<expected;w++){
     const target=expectedTimes[w];
-    // Tolerance: ±20% of average lap time
-    const tolerance=avgLap*0.25;
-    let bestIdx=-1, bestScore=-Infinity;
+    const tolerance=avgLap*0.30; // ±30% of avg lap
+    let bestIdx=-1,bestScore=-Infinity;
 
-    for(let c=0;c<merged.length;c++){
-      if(usedCandidates.has(c)) continue;
-      const dist=Math.abs(merged[c].time-target);
+    for(let c=0;c<allWalls.length;c++){
+      if(used.has(c)) continue;
+      const dist=Math.abs(allWalls[c].time-target);
       if(dist>tolerance) continue;
-
-      // Score: closeness to expected + candidate confidence
-      // Closer to expected = higher score; also reward confidence
-      const closenessScore=1.0-dist/tolerance; // 0..1
-      const score=closenessScore*0.6 + merged[c].confidence*0.4;
+      const closeness=1.0-dist/tolerance;
+      // Heavily weight pose detections over pixel-based
+      const poseBonus=allWalls[c].method.indexOf('pose')>=0?0.3:0;
+      const score=closeness*0.4+allWalls[c].confidence*0.3+poseBonus;
       if(score>bestScore){bestScore=score;bestIdx=c}
     }
 
     if(bestIdx>=0){
-      usedCandidates.add(bestIdx);
-      bestWalls.push({time:merged[bestIdx].time,confidence:merged[bestIdx].confidence,method:merged[bestIdx].method});
+      used.add(bestIdx);
+      bestWalls.push({time:allWalls[bestIdx].time,confidence:allWalls[bestIdx].confidence,method:allWalls[bestIdx].method});
     } else {
-      // No candidate near expected — use expected time as synthetic wall (low confidence)
       bestWalls.push({time:target,confidence:0.2,method:'expected-model'});
-      console.log('Wall '+w+': no candidate near expected '+target.toFixed(1)+'s, using model estimate');
+      console.log('Wall '+w+': no candidate near '+target.toFixed(1)+'s, using model');
     }
   }
 
   bestWalls.sort(function(a,b){return a.time-b.time});
-
-  // Verify spacing: check that splits are reasonable
-  let prevT=startT;
-  const splits=[];
-  for(let i=0;i<bestWalls.length;i++){
-    splits.push(bestWalls[i].time-prevT);
-    prevT=bestWalls[i].time;
-  }
-  console.log('Final walls:',bestWalls.length,bestWalls.map(function(w){return w.time.toFixed(1)+'s('+w.method+')'}));
-  console.log('Splits:',splits.map(function(s){return s.toFixed(1)+'s'}));
-
-  // Sanity check: if any split is <5s or >30s for 25yd course, something is wrong
-  const badSplit=splits.some(function(s){return s<5||s>30});
-  if(badSplit&&merged.length>=expected){
-    console.log('Bad splits detected, falling back to evenly-spaced model walls');
-    const fallback=[];
-    for(let w=0;w<expected;w++){
-      fallback.push({time:expectedTimes[w],confidence:0.3,method:'even-spacing-fallback'});
-    }
-    return fallback;
-  }
+  let prevT3=startT;
+  const finalSplits=bestWalls.map(function(w){const s=w.time-prevT3;prevT3=w.time;return s});
+  console.log('Final walls:',bestWalls.map(function(w){return w.time.toFixed(1)+'s('+w.method+')'}));
+  console.log('Final splits:',finalSplits.map(function(s){return s.toFixed(1)+'s'}));
 
   return bestWalls;
 }
@@ -1730,15 +1854,30 @@ function drawGraphAcross(motionLog,vMotionLog){
   });
   g.stroke();
 
-  // Vertical motion center (orange — oscillates as swimmer goes near↔far)
-  if(vMotionLog&&vMotionLog.length>2){
-    const midY=pad.t+gh/2;
-    function pyV(yc){return pad.t+yc*gh} // 0=top of graph=top of frame, 1=bottom
+  // MoveNet swimmer Y position (bright orange — primary signal when available)
+  if(poseLog&&poseLog.length>2){
+    function pyP(yc){return pad.t+yc*gh}
+    g.strokeStyle='rgba(255,152,0,0.9)';g.lineWidth=2;
+    g.beginPath();
+    let started=false;
+    poseLog.forEach(function(p){
+      const x=tx(p.time),y=pyP(p.swimmerY);
+      if(!started){g.moveTo(x,y);started=true}else g.lineTo(x,y);
+    });
+    g.stroke();
 
-    g.strokeStyle='rgba(255,152,0,0.15)';g.lineWidth=1;
-    g.beginPath();g.moveTo(pad.l,midY);g.lineTo(pad.l+gw,midY);g.stroke();
-
-    g.strokeStyle='rgba(255,152,0,0.7)';g.lineWidth=1.5;
+    // Also draw confidence as faint dots
+    g.fillStyle='rgba(255,152,0,0.3)';
+    poseLog.forEach(function(p){
+      if(p.confidence>0.3){
+        const x=tx(p.time),y=pyP(p.swimmerY);
+        g.beginPath();g.arc(x,y,1.5,0,Math.PI*2);g.fill();
+      }
+    });
+  } else if(vMotionLog&&vMotionLog.length>2){
+    // Fallback: pixel-based vertical motion center (dimmer orange)
+    function pyV(yc){return pad.t+yc*gh}
+    g.strokeStyle='rgba(255,152,0,0.5)';g.lineWidth=1.5;
     g.beginPath();
     vMotionLog.forEach(function(v,i){
       const x=tx(v.time),y=pyV(v.yCenter);
@@ -1774,8 +1913,12 @@ function drawGraphAcross(motionLog,vMotionLog){
 
   // Legend
   g.font='9px IBM Plex Mono';g.textAlign='right';
-  g.fillStyle='rgba(0,229,255,0.6)';g.fillText('— Motion',W-12,pad.t+10);
-  g.fillStyle='rgba(255,152,0,0.7)';g.fillText('— Swimmer Y pos',W-12,pad.t+22);
+  g.fillStyle='rgba(0,229,255,0.6)';g.fillText('— Motion energy',W-12,pad.t+10);
+  if(poseLog&&poseLog.length>2){
+    g.fillStyle='rgba(255,152,0,0.9)';g.fillText('— MoveNet Y (pose)',W-12,pad.t+22);
+  }else{
+    g.fillStyle='rgba(255,152,0,0.5)';g.fillText('— Pixel Y pos',W-12,pad.t+22);
+  }
 
   g.save();g.translate(10,pad.t+gh/2);g.rotate(-Math.PI/2);
   g.fillStyle='#3a5a6a';g.font='9px IBM Plex Mono';g.textAlign='center';
@@ -1847,7 +1990,17 @@ async function startScan(){
     showStatus('No beep detected — using video start (0s) as reference. Use 🔔 SET BEEP to adjust.','warn');
   }
 
-  // 2. SCAN VIDEO — collect camera pan, motion energy, edge composition per frame
+  // 2. LOAD MOVENET (if not already loaded)
+  showStatus('Loading MoveNet pose model...','info');
+  const detector=await loadPoseModel();
+  const useMoveNet=!!detector;
+  if(useMoveNet){
+    showStatus('MoveNet loaded. Scanning video with pose tracking...','ok');
+  }else{
+    showStatus('MoveNet unavailable — falling back to pixel-based tracking...','warn');
+  }
+
+  // 3. SCAN VIDEO — collect camera pan, motion energy, pose per frame
   const sC=document.getElementById('scan-canvas');
   const sx=sC.getContext('2d');
   const fps=10;
@@ -1859,14 +2012,19 @@ async function startScan(){
   const scanW=480, scanH=Math.round(480*V.videoHeight/V.videoWidth);
   sC.width=scanW;sC.height=scanH;
 
+  // Crop canvas for MoveNet (detect swimmer in their lane region only)
+  const cropCanvas=document.createElement('canvas');
+  const cropCtx=cropCanvas.getContext('2d');
+
   const cameraPanLog=[];
   const motionLog=[];
   const edgeLog=[];
   const vMotionLog=[]; // vertical center of motion (across-the-blocks)
+  poseLog=[]; // reset pose log
   let prevData=null;
 
-  const scanLabel=cameraAngle==='across'?'motion center & energy':'camera pan, motion & scene';
-  showStatus('Pass 1/1: Scanning video for '+scanLabel+'...','info');
+  const scanLabel=useMoveNet?'pose tracking + motion energy':'camera pan, motion & scene';
+  showStatus('Scanning video ('+scanLabel+')...','info');
 
   for(let i=0;i<totalFrames;i++){
     const t=i*frameInterval;
@@ -1883,21 +2041,18 @@ async function startScan(){
       motionLog.push({time:t,energy:energy});
 
       if(cameraAngle==='across'){
-        // Vertical center of motion (across-the-blocks primary signal)
+        // Vertical center of motion (fallback signal)
         const vCenter=computeVerticalMotionCenter(prevData,currData,scanW,scanH);
         vMotionLog.push({time:t,yCenter:vCenter});
       } else {
-        // Camera pan (side view primary signal)
         const pan=computeCameraPan(prevData,currData,scanW,scanH);
         cameraPanLog.push({time:t,pan:pan});
-
-        // Scene edge composition
         const edge=computeEdgeChange(prevData,currData,scanW,scanH);
         edge.time=t;
         edgeLog.push(edge);
       }
 
-      // Also sample rope colors if ropes are set (supplementary data)
+      // Sample rope colors
       if(ropeLeft&&ropeRight){
         const ROPE_SAMPLES=40;
         const leftColors=sampleRopeColorsBatch(imageData,scanW,scanH,ropeLeft,ROPE_SAMPLES);
@@ -1907,6 +2062,59 @@ async function startScan(){
     }
     prevData=new Uint8ClampedArray(currData);
 
+    // MoveNet pose detection — run on cropped lane region
+    if(useMoveNet&&selectedLanes.length>0){
+      try{
+        const crop=cropToSwimmerLane(sC,sx,scanW,scanH);
+        let poseInput=sC;
+        let offsetX=0,offsetY=0,cropW=scanW,cropH=scanH;
+
+        if(crop){
+          cropCanvas.width=crop.w;cropCanvas.height=crop.h;
+          cropCtx.drawImage(sC,crop.x,crop.y,crop.w,crop.h,0,0,crop.w,crop.h);
+          poseInput=cropCanvas;
+          offsetX=crop.x;offsetY=crop.y;cropW=crop.w;cropH=crop.h;
+        }
+
+        const poses=await detector.estimatePoses(poseInput);
+        if(poses.length>0&&poses[0].keypoints){
+          const kp=poses[0].keypoints;
+          // Use hip midpoint as swimmer center (most stable for swimming)
+          // MoveNet keypoints: 11=left_hip, 12=right_hip, 5=left_shoulder, 6=right_shoulder
+          let swimY=null,swimX=null,conf=0;
+          const leftHip=kp[11],rightHip=kp[12];
+          const leftSh=kp[5],rightSh=kp[6];
+
+          // Prefer hips (more visible in water), fall back to shoulders
+          if(leftHip&&rightHip&&leftHip.score>0.15&&rightHip.score>0.15){
+            swimY=(leftHip.y+rightHip.y)/2;
+            swimX=(leftHip.x+rightHip.x)/2;
+            conf=(leftHip.score+rightHip.score)/2;
+          }else if(leftSh&&rightSh&&leftSh.score>0.15&&rightSh.score>0.15){
+            swimY=(leftSh.y+rightSh.y)/2;
+            swimX=(leftSh.x+rightSh.x)/2;
+            conf=(leftSh.score+rightSh.score)/2;
+          }else{
+            // Use any keypoint with score>0.2
+            let sumX=0,sumY=0,cnt=0,sc=0;
+            for(let k=0;k<kp.length;k++){
+              if(kp[k].score>0.2){sumX+=kp[k].x;sumY+=kp[k].y;sc+=kp[k].score;cnt++}
+            }
+            if(cnt>=2){swimX=sumX/cnt;swimY=sumY/cnt;conf=sc/cnt}
+          }
+
+          if(swimY!==null){
+            // Convert back to full-frame normalized coordinates
+            const normY=(swimY+offsetY)/scanH;
+            const normX=(swimX+offsetX)/scanW;
+            poseLog.push({time:t,swimmerY:normY,swimmerX:normX,confidence:conf,keypoints:kp});
+          }
+        }
+      }catch(e){
+        // Pose detection failed for this frame — skip silently
+      }
+    }
+
     // Progress
     const pct=Math.round(i/totalFrames*100);
     document.getElementById('progress').style.width=pct+'%';
@@ -1915,10 +2123,16 @@ async function startScan(){
     if(i%5===0)await new Promise(function(r){setTimeout(r,0)});
   }
 
-  // 3. DETECT WALLS using multi-signal approach
+  console.log('Pose detections: '+poseLog.length+'/'+totalFrames+' frames with swimmer detected');
+
+  // 4. DETECT WALLS using MoveNet poses (primary) + pixel signals (fallback)
   if(cameraAngle==='across'){
-    showStatus('Analyzing vertical motion oscillation & energy for wall detection...','info');
-    wallTouches=detectWallsAcross(vMotionLog, motionLog);
+    if(poseLog.length>10){
+      showStatus('Analyzing swimmer pose trajectory for wall detection ('+poseLog.length+' pose detections)...','info');
+    }else{
+      showStatus('Analyzing motion signals for wall detection...','info');
+    }
+    wallTouches=detectWallsAcross(vMotionLog, motionLog, poseLog);
   } else {
     showStatus('Analyzing camera pan reversals & motion for wall detection...','info');
     wallTouches=detectWalls(cameraPanLog, motionLog, edgeLog);
@@ -1975,6 +2189,15 @@ function rebuildSplits(){
   let html='<tr><th>#</th><th>WALL TIME</th><th>SPLIT</th><th>CUM</th>';
   if(isRelay) html+='<th>LEG</th><th>LEG TIME</th>';
   html+='<th>TYPE</th></tr>';
+
+  // Show beep detection result
+  if(beepTime>0){
+    html+='<tr style="color:#4ecdc4"><td>🔔</td><td class="time">'+beepTime.toFixed(2)+'s</td>';
+    html+='<td colspan="'+(isRelay?'5':'3')+'">Beep detected at t='+beepTime.toFixed(2)+'s</td></tr>';
+  } else {
+    html+='<tr style="color:#ffb74d"><td>🔔</td><td class="time">0.00s</td>';
+    html+='<td colspan="'+(isRelay?'5':'3')+'">No beep in video — using t=0</td></tr>';
+  }
 
   let prev=startT;
   let legStartTimes=[startT]; // track start time of each leg
