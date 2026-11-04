@@ -1074,28 +1074,39 @@ async function detectBeep(){
       return -1;
     }
 
-    // Look for a sharp onset: find where energy first crosses 50% of peak level
-    // and stays there. A real beep has a sudden onset, not a gradual ramp.
-    const onsetThresh=baseline+(peak-baseline)*0.3;
-    let onsetIdx=-1;
-    for(let i=0;i<rms.length;i++){
-      if(rms[i].rms>onsetThresh){
-        // Verify it stays above for at least 50ms (5 frames)
-        let stays=true;
-        for(let j=i;j<Math.min(i+5,rms.length);j++){
-          if(rms[j].rms<onsetThresh*0.7){stays=false;break}
-        }
-        if(stays){onsetIdx=i;break}
-      }
+    // DERIVATIVE-BASED ONSET: find where energy rises fastest (sharpest jump).
+    // Then trace backwards to the true start of that rise.
+    // This captures the very beginning of the beep, not where it reaches a threshold.
+    const derivs=[];
+    for(let i=1;i<rms.length;i++){
+      derivs.push({idx:i,time:rms[i].time,deriv:rms[i].rms-rms[i-1].rms});
     }
 
-    if(onsetIdx<0){
-      console.log('Beep rejected: no clear onset found');
+    // Find the frame with the maximum energy derivative in first 5 seconds
+    let maxDeriv=0,maxDerivIdx=-1;
+    for(let i=0;i<derivs.length;i++){
+      if(derivs[i].time>5.0) break;
+      if(derivs[i].deriv>maxDeriv){maxDeriv=derivs[i].deriv;maxDerivIdx=derivs[i].idx}
+    }
+
+    if(maxDerivIdx<0||maxDeriv<baseline*0.5){
+      console.log('Beep rejected: no sharp energy rise found (maxDeriv='+maxDeriv.toFixed(6)+')');
       return -1;
     }
 
-    // Check that there's genuine silence before the onset (at least 200ms of quiet)
-    const silenceCheck=Math.max(0,onsetIdx-20); // 200ms before onset
+    // Trace backwards from max derivative to find where energy first starts rising above noise.
+    // The onset is where energy exceeds baseline + 10% of the rise.
+    const riseThresh=baseline+(peak-baseline)*0.10;
+    let onsetIdx=maxDerivIdx;
+    for(let i=maxDerivIdx-1;i>=0;i--){
+      if(rms[i].rms<=riseThresh){onsetIdx=i+1;break}
+      if(i===0) onsetIdx=0;
+    }
+
+    console.log('Beep derivative onset: maxDeriv at '+rms[maxDerivIdx].time.toFixed(3)+'s, traced back to onset at '+rms[onsetIdx].time.toFixed(3)+'s');
+
+    // Verify there's genuine silence before onset (at least 100ms of quiet)
+    const silenceCheck=Math.max(0,onsetIdx-10); // 100ms before onset
     let preOnsetAvg=0;
     let preCount=0;
     for(let i=silenceCheck;i<onsetIdx;i++){
@@ -1103,12 +1114,11 @@ async function detectBeep(){
     }
     if(preCount>0) preOnsetAvg/=preCount;
 
-    // The pre-onset should be clearly quieter than the onset
     const preOnsetRatio=rms[onsetIdx].rms/(preOnsetAvg||0.00001);
     console.log('Beep onset at '+rms[onsetIdx].time.toFixed(3)+'s, preOnsetAvg='+preOnsetAvg.toFixed(5)+
       ', onsetRms='+rms[onsetIdx].rms.toFixed(5)+', preOnsetRatio='+preOnsetRatio.toFixed(2));
 
-    if(preOnsetRatio<2.0){
+    if(preOnsetRatio<1.5){
       console.log('Beep rejected: onset not sharp enough (ratio='+preOnsetRatio.toFixed(2)+')');
       return -1;
     }
@@ -1595,32 +1605,87 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
 
     // Find extrema of the smoothed Y trajectory
     // These are wall touches: swimmer at near wall (one extreme) or far wall (other extreme)
+    // Use wider window (3 each side) for more robust detection
     const rawExtrema=[];
-    for(let i=2;i<smoothY.length-2;i++){
-      const p2=smoothY[i-2].y,p1=smoothY[i-1].y;
+    for(let i=3;i<smoothY.length-3;i++){
       const c=smoothY[i].y;
-      const n1=smoothY[i+1].y,n2=smoothY[i+2].y;
-
-      const isMax=c>=p1&&c>=p2&&c>=n1&&c>=n2&&(c>p1||c>n1);
-      const isMin=c<=p1&&c<=p2&&c<=n1&&c<=n2&&(c<p1||c<n1);
+      let isMax=true,isMin=true;
+      for(let d=1;d<=3;d++){
+        if(smoothY[i-d].y>c) isMax=false;
+        if(smoothY[i+d].y>c) isMax=false;
+        if(smoothY[i-d].y<c) isMin=false;
+        if(smoothY[i+d].y<c) isMin=false;
+      }
+      // Need at least one strict inequality
+      if(isMax&&c===smoothY[i-1].y&&c===smoothY[i+1].y) isMax=false;
+      if(isMin&&c===smoothY[i-1].y&&c===smoothY[i+1].y) isMin=false;
 
       if(isMax||isMin){
-        // Measure amplitude around this extremum
+        // Measure amplitude in wider neighborhood
         let localMin=c,localMax=c;
-        for(let j=Math.max(0,i-10);j<=Math.min(smoothY.length-1,i+10);j++){
+        for(let j=Math.max(0,i-15);j<=Math.min(smoothY.length-1,i+15);j++){
           if(smoothY[j].y<localMin)localMin=smoothY[j].y;
           if(smoothY[j].y>localMax)localMax=smoothY[j].y;
         }
         const amplitude=localMax-localMin;
-        if(amplitude>0.02){ // need meaningful oscillation
+        if(amplitude>0.008){ // lowered threshold for subtle camera angles
           rawExtrema.push({
             time:smoothY[i].time,
             y:c,
             amplitude:amplitude,
-            confidence:Math.min(1.0,amplitude*8)*smoothY[i].conf,
+            confidence:Math.min(1.0,amplitude*10)*smoothY[i].conf,
             isMax:isMax,
             method:'pose-extremum'
           });
+        }
+      }
+    }
+
+    // Also detect walls via Y-velocity sign changes (derivative zero-crossings)
+    // This catches broader turns that aren't sharp peaks
+    const yVel=[];
+    for(let i=1;i<smoothY.length;i++){
+      yVel.push({time:(smoothY[i].time+smoothY[i-1].time)/2,
+        vel:smoothY[i].y-smoothY[i-1].y,
+        conf:(smoothY[i].conf+smoothY[i-1].conf)/2});
+    }
+    // Smooth the velocity
+    const smoothVel=[];
+    const vhw=4;
+    for(let i=0;i<yVel.length;i++){
+      let sum=0,wt=0;
+      for(let j=Math.max(0,i-vhw);j<=Math.min(yVel.length-1,i+vhw);j++){
+        sum+=yVel[j].vel;wt++;
+      }
+      smoothVel.push({time:yVel[i].time,vel:sum/wt,conf:yVel[i].conf});
+    }
+    // Find zero-crossings of smoothed velocity
+    for(let i=1;i<smoothVel.length;i++){
+      if(smoothVel[i-1].vel*smoothVel[i].vel<0){ // sign change
+        const crossTime=smoothVel[i].time;
+        // Check this isn't already covered by an extremum
+        let alreadyCovered=false;
+        for(let e=0;e<rawExtrema.length;e++){
+          if(Math.abs(rawExtrema[e].time-crossTime)<1.5){alreadyCovered=true;break}
+        }
+        if(!alreadyCovered){
+          // Measure local amplitude around this zero-crossing
+          const ci=Math.round((crossTime-smoothY[0].time)/(smoothY[1].time-smoothY[0].time||0.033));
+          let lMin=1,lMax=0;
+          for(let j=Math.max(0,ci-15);j<=Math.min(smoothY.length-1,ci+15);j++){
+            if(smoothY[j].y<lMin) lMin=smoothY[j].y;
+            if(smoothY[j].y>lMax) lMax=smoothY[j].y;
+          }
+          const amp=lMax-lMin;
+          if(amp>0.008){
+            rawExtrema.push({
+              time:crossTime,y:smoothY[Math.min(ci,smoothY.length-1)]?smoothY[Math.min(ci,smoothY.length-1)].y:0.5,
+              amplitude:amp,
+              confidence:Math.min(1.0,amp*8)*smoothVel[i].conf*0.8,
+              isMax:smoothVel[i-1].vel>0,
+              method:'pose-velocity-cross'
+            });
+          }
         }
       }
     }
