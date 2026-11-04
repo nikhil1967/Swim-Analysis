@@ -1690,8 +1690,52 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
       }
     }
 
-    console.log('Raw pose extrema:',rawExtrema.length,rawExtrema.map(function(e){
-      return e.time.toFixed(1)+'s('+(e.isMax?'MAX':'MIN')+',y='+e.y.toFixed(3)+',amp='+e.amplitude.toFixed(3)+')'
+    // ANKLE VISIBILITY: both ankles visible = flip turn at wall (freestyle/backstroke)
+    // Find peaks in ankle confidence as supplementary wall signal
+    const ankleFrames=poses.filter(function(p){return p.ankleConf>0.25});
+    if(ankleFrames.length>0){
+      console.log('Ankle-visible frames: '+ankleFrames.length+' (>0.25 conf)');
+      // Cluster ankle-visible frames by time (within 1.5s = same turn)
+      const ankleClusters=[];
+      let cluster=[ankleFrames[0]];
+      for(let i=1;i<ankleFrames.length;i++){
+        if(ankleFrames[i].time-ankleFrames[i-1].time<1.5){
+          cluster.push(ankleFrames[i]);
+        }else{
+          ankleClusters.push(cluster);cluster=[ankleFrames[i]];
+        }
+      }
+      ankleClusters.push(cluster);
+
+      for(let c=0;c<ankleClusters.length;c++){
+        const cl=ankleClusters[c];
+        // Find best ankle frame in cluster
+        let bestConf=0,bestTime=0;
+        for(let j=0;j<cl.length;j++){
+          if(cl[j].ankleConf>bestConf){bestConf=cl[j].ankleConf;bestTime=cl[j].time}
+        }
+        // Check if this overlaps with an existing extremum
+        let overlaps=false;
+        for(let e=0;e<rawExtrema.length;e++){
+          if(Math.abs(rawExtrema[e].time-bestTime)<2.0){
+            rawExtrema[e].confidence=Math.min(1.0,rawExtrema[e].confidence+bestConf*0.3);
+            rawExtrema[e].method+=('+ankle');
+            overlaps=true;break;
+          }
+        }
+        if(!overlaps&&bestConf>0.3){
+          rawExtrema.push({
+            time:bestTime,y:0.5,amplitude:0.02,
+            confidence:bestConf*0.7,isMax:false,
+            method:'ankle-turn'
+          });
+        }
+      }
+      console.log('Ankle clusters: '+ankleClusters.length);
+    }
+
+    console.log('Raw pose extrema (incl. velocity+ankle):',rawExtrema.length,rawExtrema.map(function(e){
+      return e.time.toFixed(1)+'s('+e.method+',y='+e.y.toFixed(3)+',amp='+e.amplitude.toFixed(3)+',conf='+e.confidence.toFixed(2)+')'
     }));
 
     // Filter: skip first 3s after start (dive splash), enforce minimum gap
@@ -2172,7 +2216,10 @@ async function startScan(){
             // Convert back to full-frame normalized coordinates
             const normY=(swimY+offsetY)/scanH;
             const normX=(swimX+offsetX)/scanW;
-            poseLog.push({time:t,swimmerY:normY,swimmerX:normX,confidence:conf,keypoints:kp});
+            // Track ankle visibility — both ankles visible = likely flip turn at wall
+            const lAnkle=kp[15],rAnkle=kp[16];
+            const ankleConf=(lAnkle&&rAnkle)?Math.min(lAnkle.score,rAnkle.score):0;
+            poseLog.push({time:t,swimmerY:normY,swimmerX:normX,confidence:conf,ankleConf:ankleConf,keypoints:kp});
           }
         }
       }catch(e){
