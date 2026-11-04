@@ -858,32 +858,7 @@ function drawOverlay(){
   const vr=getVideoRect();
   if(!vr)return;
 
-  // Draw auto-detected rope lines
-  if(detectedRopes.length>0){
-    ctx.save();
-    ctx.beginPath();ctx.rect(vr.x,vr.y,vr.w,vr.h);ctx.clip();
-
-    detectedRopes.forEach(function(rope){
-      const alpha=0.15+rope.confidence*0.25;
-      ctx.strokeStyle='rgba(0,229,255,'+alpha+')';
-      ctx.lineWidth=1;
-      ctx.setLineDash([6,4]);
-      ctx.beginPath();
-      if(rope.axis==='vertical'){
-        const px=vr.x+rope.xNorm*vr.w;
-        ctx.moveTo(px,vr.y);ctx.lineTo(px,vr.y+vr.h);
-      } else {
-        const py=vr.y+rope.yNorm*vr.h;
-        ctx.moveTo(vr.x,py);ctx.lineTo(vr.x+vr.w,py);
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
-    });
-
-    ctx.restore();
-  }
-
-  // Draw selected lane highlights
+  // Draw selected swimmer marker (tap crosshair + label, no rope lines)
   if(selectedLanes.length>0){
     ctx.save();
     ctx.beginPath();ctx.rect(vr.x,vr.y,vr.w,vr.h);ctx.clip();
@@ -892,36 +867,15 @@ function drawOverlay(){
     selectedLanes.forEach(function(lane,i){
       const color=laneColors[i%laneColors.length];
 
-      if(lane.axis==='vertical'){
-        // Across-the-blocks: vertical lane band
-        const xL=vr.x+lane.ropeLeftV.xNorm*vr.w;
-        const xR=vr.x+lane.ropeRightV.xNorm*vr.w;
-        ctx.fillStyle=color+'0.06)';
-        ctx.fillRect(xL,vr.y,xR-xL,vr.h);
-        ctx.strokeStyle=color+'0.6)';ctx.lineWidth=2;
-        ctx.beginPath();ctx.moveTo(xL,vr.y);ctx.lineTo(xL,vr.y+vr.h);ctx.stroke();
-        ctx.beginPath();ctx.moveTo(xR,vr.y);ctx.lineTo(xR,vr.y+vr.h);ctx.stroke();
-        ctx.fillStyle=color+'0.8)';ctx.font='bold 10px IBM Plex Mono';ctx.textAlign='left';
-        ctx.fillText(lane.label,xL+4,vr.y+14);
-      } else {
-        // Side view: horizontal lane band
-        const yTop=vr.y+lane.ropeAbove.yNorm*vr.h;
-        const yBot=vr.y+lane.ropeBelow.yNorm*vr.h;
-        ctx.fillStyle=color+'0.06)';
-        ctx.fillRect(vr.x,yTop,vr.w,yBot-yTop);
-        ctx.strokeStyle=color+'0.6)';ctx.lineWidth=2;
-        ctx.beginPath();ctx.moveTo(vr.x,yTop);ctx.lineTo(vr.x+vr.w,yTop);ctx.stroke();
-        ctx.beginPath();ctx.moveTo(vr.x,yBot);ctx.lineTo(vr.x+vr.w,yBot);ctx.stroke();
-        ctx.fillStyle=color+'0.8)';ctx.font='bold 10px IBM Plex Mono';ctx.textAlign='left';
-        ctx.fillText(lane.label,vr.x+8,yTop+12);
-      }
-
-      // Tap marker (both modes)
+      // Tap marker — crosshair on the selected swimmer
       const tapPx=vr.x+lane.tapX*vr.w, tapPy=vr.y+lane.tapY*vr.h;
       ctx.strokeStyle=color+'0.9)';ctx.lineWidth=2;
-      ctx.beginPath();ctx.arc(tapPx,tapPy,8,0,Math.PI*2);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(tapPx-4,tapPy);ctx.lineTo(tapPx+4,tapPy);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(tapPx,tapPy-4);ctx.lineTo(tapPx,tapPy+4);ctx.stroke();
+      ctx.beginPath();ctx.arc(tapPx,tapPy,10,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(tapPx-5,tapPy);ctx.lineTo(tapPx+5,tapPy);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(tapPx,tapPy-5);ctx.lineTo(tapPx,tapPy+5);ctx.stroke();
+      // Label
+      ctx.fillStyle=color+'0.8)';ctx.font='bold 10px IBM Plex Mono';ctx.textAlign='left';
+      ctx.fillText(lane.label,tapPx+14,tapPy+4);
     });
 
     ctx.restore();
