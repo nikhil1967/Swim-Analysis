@@ -1709,15 +1709,21 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
 
       for(let c=0;c<ankleClusters.length;c++){
         const cl=ankleClusters[c];
-        // Find best ankle frame in cluster
-        let bestConf=0,bestTime=0;
+        // The ankles are visible during the flip — the actual wall TOUCH is shortly AFTER,
+        // when feet plant on wall and push off (typically 0.3-1.0s after peak ankle visibility).
+        // Use the END of the ankle cluster + small offset as the estimated wall touch time.
+        let bestConf=0,lastAnkleTime=0;
         for(let j=0;j<cl.length;j++){
-          if(cl[j].ankleConf>bestConf){bestConf=cl[j].ankleConf;bestTime=cl[j].time}
+          if(cl[j].ankleConf>bestConf) bestConf=cl[j].ankleConf;
+          if(cl[j].time>lastAnkleTime) lastAnkleTime=cl[j].time;
         }
-        // Check if this overlaps with an existing extremum
+        // Wall touch ~0.5s after last ankle frame (feet plant + push off)
+        const wallEstimate=lastAnkleTime+0.5;
+
+        // Look for a pose extremum near this estimated wall time (within 1.5s after ankles)
         let overlaps=false;
         for(let e=0;e<rawExtrema.length;e++){
-          if(Math.abs(rawExtrema[e].time-bestTime)<2.0){
+          if(rawExtrema[e].time>=lastAnkleTime-0.5&&rawExtrema[e].time<=wallEstimate+1.0){
             rawExtrema[e].confidence=Math.min(1.0,rawExtrema[e].confidence+bestConf*0.3);
             rawExtrema[e].method+=('+ankle');
             overlaps=true;break;
@@ -1725,9 +1731,9 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
         }
         if(!overlaps&&bestConf>0.3){
           rawExtrema.push({
-            time:bestTime,y:0.5,amplitude:0.02,
+            time:wallEstimate,y:0.5,amplitude:0.02,
             confidence:bestConf*0.7,isMax:false,
-            method:'ankle-turn'
+            method:'ankle-wall'
           });
         }
       }
