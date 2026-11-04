@@ -1580,76 +1580,52 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
   if(expected===0) return [];
 
   // ===== PRIMARY SIGNAL: MoveNet swimmer Y-position =====
-  // In across-the-blocks view, swimmer Y-position oscillates as they go near↔far wall.
-  // Wall touches = extrema (peaks and valleys) of Y-position trajectory.
+  // In across-the-blocks view, the swimmer oscillates between near wall (high Y) and far wall (low Y).
+  // The lane ropes are fixed references — the swimmer's Y-range maps to the pool length.
+  // Wall touch = swimmer reaches a wall zone AND direction reverses (toward↔away from camera).
   const poseWalls=[];
 
   if(poses.length>=10){
     console.log('Using MoveNet pose trajectory as PRIMARY wall detection signal');
 
-    // Smooth the swimmer Y-position
-    const hw=5; // smoothing half-window
+    // Smooth the swimmer Y-position (confidence-weighted)
+    const hw=5;
     const smoothY=[];
     for(let i=0;i<poses.length;i++){
-      let sum=0,cnt=0,wSum=0;
+      let sum=0,wSum=0;
       for(let j=Math.max(0,i-hw);j<=Math.min(poses.length-1,i+hw);j++){
         const w=poses[j].confidence;
-        sum+=poses[j].swimmerY*w;wSum+=w;cnt++;
+        sum+=poses[j].swimmerY*w;wSum+=w;
       }
       smoothY.push({time:poses[i].time,y:wSum>0?sum/wSum:poses[i].swimmerY,conf:poses[i].confidence});
     }
 
-    console.log('Smoothed pose Y trajectory (first 10):', smoothY.slice(0,10).map(function(s){
-      return s.time.toFixed(1)+'s:'+s.y.toFixed(3)
-    }));
-
-    // Find extrema of the smoothed Y trajectory
-    // These are wall touches: swimmer at near wall (one extreme) or far wall (other extreme)
-    // Use wider window (3 each side) for more robust detection
-    const rawExtrema=[];
-    for(let i=3;i<smoothY.length-3;i++){
-      const c=smoothY[i].y;
-      let isMax=true,isMin=true;
-      for(let d=1;d<=3;d++){
-        if(smoothY[i-d].y>c) isMax=false;
-        if(smoothY[i+d].y>c) isMax=false;
-        if(smoothY[i-d].y<c) isMin=false;
-        if(smoothY[i+d].y<c) isMin=false;
-      }
-      // Need at least one strict inequality
-      if(isMax&&c===smoothY[i-1].y&&c===smoothY[i+1].y) isMax=false;
-      if(isMin&&c===smoothY[i-1].y&&c===smoothY[i+1].y) isMin=false;
-
-      if(isMax||isMin){
-        // Measure amplitude in wider neighborhood
-        let localMin=c,localMax=c;
-        for(let j=Math.max(0,i-15);j<=Math.min(smoothY.length-1,i+15);j++){
-          if(smoothY[j].y<localMin)localMin=smoothY[j].y;
-          if(smoothY[j].y>localMax)localMax=smoothY[j].y;
-        }
-        const amplitude=localMax-localMin;
-        if(amplitude>0.008){ // lowered threshold for subtle camera angles
-          rawExtrema.push({
-            time:smoothY[i].time,
-            y:c,
-            amplitude:amplitude,
-            confidence:Math.min(1.0,amplitude*10)*smoothY[i].conf,
-            isMax:isMax,
-            method:'pose-extremum'
-          });
-        }
-      }
+    // Establish wall positions from the swimmer's Y-range (ropes as fixed reference).
+    // The full Y-range over the race = distance between walls in frame coordinates.
+    let yMin=1,yMax=0;
+    for(let i=0;i<smoothY.length;i++){
+      if(smoothY[i].time<startT+1) continue; // skip first second (dive)
+      if(smoothY[i].y<yMin) yMin=smoothY[i].y;
+      if(smoothY[i].y>yMax) yMax=smoothY[i].y;
     }
+    const yRange=yMax-yMin;
+    // Wall zones: within 20% of Y-range from each extreme
+    const wallZoneSize=yRange*0.20;
+    const nearWallMin=yMax-wallZoneSize; // near wall = high Y (bottom of frame)
+    const farWallMax=yMin+wallZoneSize;  // far wall = low Y (top of frame)
 
-    // Also detect walls via Y-velocity sign changes (derivative zero-crossings)
-    // This catches broader turns that aren't sharp peaks
+    console.log('Wall zones: farWall Y<'+farWallMax.toFixed(3)+', nearWall Y>'+nearWallMin.toFixed(3)+
+      ' (yRange='+yMin.toFixed(3)+'-'+yMax.toFixed(3)+', zone='+wallZoneSize.toFixed(3)+')');
+
+    // Compute smoothed Y-velocity (direction of travel)
     const yVel=[];
     for(let i=1;i<smoothY.length;i++){
+      const dt=smoothY[i].time-smoothY[i-1].time;
+      if(dt<=0) continue;
       yVel.push({time:(smoothY[i].time+smoothY[i-1].time)/2,
-        vel:smoothY[i].y-smoothY[i-1].y,
+        vel:(smoothY[i].y-smoothY[i-1].y)/dt,
         conf:(smoothY[i].conf+smoothY[i-1].conf)/2});
     }
-    // Smooth the velocity
     const smoothVel=[];
     const vhw=4;
     for(let i=0;i<yVel.length;i++){
@@ -1659,36 +1635,82 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
       }
       smoothVel.push({time:yVel[i].time,vel:sum/wt,conf:yVel[i].conf});
     }
-    // Find zero-crossings of smoothed velocity
+
+    // WALL-ZONE + DIRECTION REVERSAL detection:
+    // Find moments where swimmer is in a wall zone AND velocity crosses zero (direction change).
+    const rawExtrema=[];
     for(let i=1;i<smoothVel.length;i++){
-      if(smoothVel[i-1].vel*smoothVel[i].vel<0){ // sign change
+      // Velocity sign change = direction reversal
+      if(smoothVel[i-1].vel*smoothVel[i].vel<=0&&(smoothVel[i-1].vel!==0||smoothVel[i].vel!==0)){
         const crossTime=smoothVel[i].time;
-        // Check this isn't already covered by an extremum
-        let alreadyCovered=false;
-        for(let e=0;e<rawExtrema.length;e++){
-          if(Math.abs(rawExtrema[e].time-crossTime)<1.5){alreadyCovered=true;break}
-        }
-        if(!alreadyCovered){
-          // Measure local amplitude around this zero-crossing
-          const ci=Math.round((crossTime-smoothY[0].time)/(smoothY[1].time-smoothY[0].time||0.033));
-          let lMin=1,lMax=0;
-          for(let j=Math.max(0,ci-15);j<=Math.min(smoothY.length-1,ci+15);j++){
-            if(smoothY[j].y<lMin) lMin=smoothY[j].y;
-            if(smoothY[j].y>lMax) lMax=smoothY[j].y;
+        // Find swimmer Y at this time (interpolate from smoothY)
+        let yAtCross=0.5;
+        for(let j=0;j<smoothY.length-1;j++){
+          if(smoothY[j].time<=crossTime&&smoothY[j+1].time>=crossTime){
+            const frac=(crossTime-smoothY[j].time)/(smoothY[j+1].time-smoothY[j].time||0.001);
+            yAtCross=smoothY[j].y+(smoothY[j+1].y-smoothY[j].y)*frac;
+            break;
           }
-          const amp=lMax-lMin;
-          if(amp>0.008){
+        }
+        // Is the swimmer in a wall zone?
+        const inNearWall=yAtCross>=nearWallMin;
+        const inFarWall=yAtCross<=farWallMax;
+        if(inNearWall||inFarWall){
+          // How deep into the wall zone? (0=edge, 1=at wall)
+          let wallDepth=0;
+          if(inNearWall) wallDepth=(yAtCross-nearWallMin)/wallZoneSize;
+          if(inFarWall) wallDepth=(farWallMax-yAtCross)/wallZoneSize;
+          wallDepth=Math.min(1.0,wallDepth);
+
+          const conf=Math.min(1.0,(0.5+wallDepth*0.5)*smoothVel[i].conf);
+          rawExtrema.push({
+            time:crossTime,
+            y:yAtCross,
+            amplitude:yRange,
+            confidence:conf,
+            isMax:inNearWall,
+            method:'wall-zone-reversal'
+          });
+        }
+      }
+    }
+
+    // Also keep pure extrema detection as supplementary (for cases where wall zone is imprecise)
+    for(let i=3;i<smoothY.length-3;i++){
+      const c=smoothY[i].y;
+      let isMax=true,isMin=true;
+      for(let d=1;d<=3;d++){
+        if(smoothY[i-d].y>c) isMax=false;
+        if(smoothY[i+d].y>c) isMax=false;
+        if(smoothY[i-d].y<c) isMin=false;
+        if(smoothY[i+d].y<c) isMin=false;
+      }
+      if(isMax&&c===smoothY[i-1].y&&c===smoothY[i+1].y) isMax=false;
+      if(isMin&&c===smoothY[i-1].y&&c===smoothY[i+1].y) isMin=false;
+      if(isMax||isMin){
+        let lMin=c,lMax=c;
+        for(let j=Math.max(0,i-15);j<=Math.min(smoothY.length-1,i+15);j++){
+          if(smoothY[j].y<lMin)lMin=smoothY[j].y;
+          if(smoothY[j].y>lMax)lMax=smoothY[j].y;
+        }
+        const amp=lMax-lMin;
+        if(amp>0.008){
+          // Check if already covered by a wall-zone-reversal
+          let covered=false;
+          for(let e=0;e<rawExtrema.length;e++){
+            if(Math.abs(rawExtrema[e].time-smoothY[i].time)<1.5){covered=true;break}
+          }
+          if(!covered){
             rawExtrema.push({
-              time:crossTime,y:smoothY[Math.min(ci,smoothY.length-1)]?smoothY[Math.min(ci,smoothY.length-1)].y:0.5,
-              amplitude:amp,
-              confidence:Math.min(1.0,amp*8)*smoothVel[i].conf*0.8,
-              isMax:smoothVel[i-1].vel>0,
-              method:'pose-velocity-cross'
+              time:smoothY[i].time,y:c,amplitude:amp,
+              confidence:Math.min(1.0,amp*10)*smoothY[i].conf*0.7,
+              isMax:isMax,method:'pose-extremum'
             });
           }
         }
       }
     }
+    // (Velocity zero-crossings are now handled by wall-zone-reversal above)
 
     // ANKLE VISIBILITY: both ankles visible = flip turn at wall (freestyle/backstroke)
     // Find peaks in ankle confidence as supplementary wall signal
