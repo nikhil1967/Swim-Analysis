@@ -1709,32 +1709,54 @@ function detectWallsAcross(vMotionLog, motionLog, posesArg){
 
       for(let c=0;c<ankleClusters.length;c++){
         const cl=ankleClusters[c];
-        // The ankles are visible during the flip — the actual wall TOUCH is shortly AFTER,
-        // when feet plant on wall and push off (typically 0.3-1.0s after peak ankle visibility).
-        // Use the END of the ankle cluster + small offset as the estimated wall touch time.
-        let bestConf=0,lastAnkleTime=0;
+        // Ankles visible = flip turn in progress. The actual wall TOUCH is when the
+        // swimmer's Y-position reverses direction (feet plant, push off, swim away).
+        // Use ankles to define a search window, then find the Y-direction reversal in it.
+        let bestConf=0,firstAnkleTime=cl[0].time,lastAnkleTime=cl[0].time;
         for(let j=0;j<cl.length;j++){
           if(cl[j].ankleConf>bestConf) bestConf=cl[j].ankleConf;
           if(cl[j].time>lastAnkleTime) lastAnkleTime=cl[j].time;
         }
-        // Wall touch ~0.5s after last ankle frame (feet plant + push off)
-        const wallEstimate=lastAnkleTime+0.5;
+        // Search window: from start of ankle cluster to 2s after end
+        const searchStart=firstAnkleTime-0.5;
+        const searchEnd=lastAnkleTime+2.0;
 
-        // Look for a pose extremum near this estimated wall time (within 1.5s after ankles)
+        // First check: does an existing extremum fall in this window?
         let overlaps=false;
         for(let e=0;e<rawExtrema.length;e++){
-          if(rawExtrema[e].time>=lastAnkleTime-0.5&&rawExtrema[e].time<=wallEstimate+1.0){
+          if(rawExtrema[e].time>=searchStart&&rawExtrema[e].time<=searchEnd){
             rawExtrema[e].confidence=Math.min(1.0,rawExtrema[e].confidence+bestConf*0.3);
             rawExtrema[e].method+=('+ankle');
             overlaps=true;break;
           }
         }
         if(!overlaps&&bestConf>0.3){
-          rawExtrema.push({
-            time:wallEstimate,y:0.5,amplitude:0.02,
-            confidence:bestConf*0.7,isMax:false,
-            method:'ankle-wall'
-          });
+          // Find the Y-direction reversal in the search window from smoothed trajectory
+          let bestReversal=null;
+          for(let i=1;i<smoothY.length-1;i++){
+            if(smoothY[i].time<searchStart||smoothY[i].time>searchEnd) continue;
+            const prev=smoothY[i-1].y,curr=smoothY[i].y,next=smoothY[i+1].y;
+            // Direction change: was going one way, now going another
+            if((curr-prev)*(next-curr)<=0&&(curr!==prev||curr!==next)){
+              if(!bestReversal||smoothY[i].conf>bestReversal.conf){
+                bestReversal={time:smoothY[i].time,y:curr,conf:smoothY[i].conf};
+              }
+            }
+          }
+          if(bestReversal){
+            rawExtrema.push({
+              time:bestReversal.time,y:bestReversal.y,amplitude:0.015,
+              confidence:bestConf*0.7,isMax:false,
+              method:'ankle-reversal'
+            });
+          } else {
+            // No reversal found — use end of ankle cluster as best guess
+            rawExtrema.push({
+              time:lastAnkleTime,y:0.5,amplitude:0.015,
+              confidence:bestConf*0.5,isMax:false,
+              method:'ankle-end'
+            });
+          }
         }
       }
       console.log('Ankle clusters: '+ankleClusters.length);
